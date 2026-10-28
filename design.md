@@ -13,7 +13,7 @@
 - 多脚本：`/api/hello.ts`、`/admin/index.ts` 各自独立运行，无需重启服务
 - CGI 风格脚本：脚本内直接读 `process.env` / `Deno.stdin`，用 `console.log` 输出响应
 - 脚本级权限隔离：每个脚本只能访问配置允许的路径 / 域名
-- 单进程常驻，每请求一个一次性 Worker；`deno compile` 出单文件二进制
+- 单进程常驻，脚本跑在 Worker 里；`deno compile` 出单文件二进制
 
 ### 非目标（第一版）
 
@@ -38,11 +38,13 @@ Browser ──HTTP──> Caddy ──FastCGI(unix socket)──> deno-fastcgi �
                   │  ├─ router          路径 → 脚本   │
                   │  └─ pool            并发控制      │
                   └────────────────┬────────────────┘
-                                   │ 每请求一个全新 Worker
+                                   │  每请求一个 Worker
+                                   │ （常驻形态下复用同一个）
                   ┌────────────────┴────────────────┐
-                  │  Worker (一次性 isolate)         │
-                  │  ├─ bootstrap: 注入 CGI 上下文    │
-                    │  └─ import(file://脚本) → 顶层执行 │
+                  │  Worker isolate                  │
+                  │  ├─ 注入 CGI 上下文               │
+                  │  ├─ import(file:// 脚本)          │
+                  │  └─ 顶层执行 或 调 default.fetch  │
                   └─────────────────────────────────┘
 ```
 
@@ -87,7 +89,8 @@ version:1 type:1 requestId:2 contentLength:2 paddingLength:1 reserved:1
 - 一条连接上可多路复用多个 `requestId`（`keep_conn` 时必须支持）
 - 每个连接维护 `Map<requestId, RequestState>`，独立状态机：
   `WAIT_PARAMS → WAIT_STDIN → RUNNING → DONE`
-- 并发上限：`--max-requests-per-conn`，超出时按 `OVERLOADED` 结束请求
+- 并发上限：单连接同时最多 64 个请求（`maxRequestsPerConnection`，暂未暴露成 CLI 参数），超出时按
+  `OVERLOADED` 结束请求
 - 背压：STDOUT 写入走 `Deno.Writer.write` 并 `await`，不无限缓冲
 
 ### 关键常量
@@ -228,15 +231,18 @@ npm/jsr 模块的下载与缓存读取是 Deno 加载器行为，不受脚本权
 `REMOTE_ADDR`、`REMOTE_PORT`、`SERVER_ADDR`、`SERVER_PORT`、`SERVER_NAME`、`HTTPS`、 以及 `HTTP_*`
 形式的请求头。
 
-宿主进程自身的环境变量默认**不继承**，可用 `--inherit-env` 白名单开启。
+宿主进程自身的环境变量**不继承**：脚本只能看到本次请求的 CGI 变量， `process.env` / `Deno.env`
+都指向这份数据。
 
 ### 并发与全局状态
 
-`process.env` / `console` 的 hook 是 isolate 级全局，但我们**每请求都用一个全新 Worker**，
-所以不存在跨请求串扰，也不需要串行化队列。
+`process.env` / `console` 的 hook 是 isolate 级全局，所以两种形态的隔离方式不同：
 
-- 一个请求 = 一个 Worker isolate，跑完即弃
-- 并发数由 `maxWorkers` 限制，超出的请求排队或返回 `OVERLOADED`
+- **顶层执行式**：每请求一个全新 Worker，天然无跨请求串扰，不需要串行化
+- **常驻（`default.fetch`）**：同一个 Worker 内请求**串行**（并发靠多个 Worker 叠加， 见
+  §6），模块状态在请求间共享
+
+两种形态的总并发都受 `maxWorkers` 限制，超出的请求排队。
 
 ### 执行模型（重要）
 
@@ -349,8 +355,8 @@ interface PoolOptions {
 
 ```
 主进程 CLI 权限  = 全局上限（--allow-read / --allow-net ...）
-默认权限         = {}，但自动追加“当前脚本文件”的 read
-路由覆盖         = FCGI_ALLOW_* 与默认值合并
+默认权限         = {}，但自动追加 DOCUMENT_ROOT 的 read
+路由覆盖         = FCGI_ALLOW_* 与默认值合并（见下表）
 ```
 
 `read` 默认是整个 `DOCUMENT_ROOT`（边界就是上面路由用的那个值），所以脚本能加载自己、
@@ -394,10 +400,11 @@ reverse_proxy @api unix//run/deno-fastcgi.sock {
 > 形式仍保留，用于从环境变量 / 外部注入的场景。
 
 - 只要出现了任意一个 `FCGI_ALLOW_*`，未列出的权限类型均被拒绝（Deno 的默认语义）
-- 宿主会**自动**把自身源码目录追加进 read 白名单，否则 Worker 连 bootstrap 都加载不了
+- Worker 的 entry（`src/runtime/worker-entry.ts`）由主进程加载，**不占** Worker 的 read 额度；
+  Worker 的 `read` 只影响脚本体及其 `import`
 - 所有 `FCGI_*` 变量不会注入给脚本
 - Worker 池 key 包含权限，权限变化自动分组
-- 缺省（一个不传）= 零权限，仅自动获得当前脚本文件的 read
+- 缺省（一个不传）= 零权限，read 自动获得整个 `DOCUMENT_ROOT`
 - 解析失败 → 500 + stderr
 - Worker 创建时传 `deno: { permissions }`，实测降级生效、提权被拒
 - 需要启动时加 `--unstable-worker-options`；缺失时整个请求会失败，启动时应告警
@@ -536,26 +543,30 @@ tests/
 
 ## 11. 风险与限制
 
-| 风险                                | 影响                                 | 对策                                                      |
-| ----------------------------------- | ------------------------------------ | --------------------------------------------------------- |
-| `--unstable-worker-options`         | 未来版本可能改标志名                 | 启动时探测，缺失则退化为「不降权」并告警                  |
-| `Deno.env` 进程级共享               | 脚本用 `Deno.env.get` 拿不到请求变量 | 已通过替换 `globalThis.Deno` 为 Proxy 解决                |
-| 每请求新建 isolate 有启动开销       | 首字节变慢                           | 实测 ~9ms；V8 code cache 会复用编译产物                   |
-| 无法保留进程内状态（连接池等）      | 每次请求重连 DB                      | 与 PHP 一致；需要共享状态请用 redis / 数据库              |
-| Caddy FastCGI 不支持 chunked 请求体 | 大文件上传受限                       | 文档说明；用 `request_buffers unlimited` 或改走 HTTP 反代 |
-| TS 转译开销                         | 首次请求慢                           | Deno 自带 V8 code cache，后续请求命中                     |
+| 风险                                | 影响                                 | 对策                                                       |
+| ----------------------------------- | ------------------------------------ | ---------------------------------------------------------- |
+| `--unstable-worker-options`         | 未来版本可能改标志名                 | 启动时探测，缺失则退化为「不降权」并告警                   |
+| `Deno.env` 进程级共享               | 脚本用 `Deno.env.get` 拿不到请求变量 | 已通过替换 `globalThis.Deno` 为 Proxy 解决                 |
+| 每请求新建 isolate 有启动开销       | 首字节变慢                           | 实测 ~9ms；V8 code cache 会复用编译产物                    |
+| 顶层执行式不保留进程内状态          | 每次请求重连 DB                      | 与 PHP 一致；需要连接池请改用 `export default { fetch }`   |
+| 常驻形态共享模块状态                | 并发写同一份状态需要自己加锁         | 同一 Worker 内请求串行执行；不改 Worker 之间的共享         |
+| resident 大响应全量缓冲             | 超大文件占内存                       | 目前读成 arrayBuffer 再回传（transfer 免拷贝，但未免内存） |
+| Caddy FastCGI 不支持 chunked 请求体 | 大文件上传受限                       | 文档说明；用 `request_buffers unlimited` 或改走 HTTP 反代  |
+| TS 转译开销                         | 首次请求慢                           | Deno 自带 V8 code cache，后续请求命中                      |
 
 ---
 
 ## 12. 已确认的决策
 
-| 决策            | 结论                                                                                |
-| --------------- | ----------------------------------------------------------------------------------- |
-| 脚本形态        | **只支持顶层执行式（PHP 式）**，不支持 `export default` handler                     |
-| 执行模型        | 每请求一个全新 Worker，顶层代码每请求重算，不复用模块状态                           |
-| `Deno.env` 兼容 | 一期实现 Proxy 注入                                                                 |
-| 权限配置位置    | 由 Caddy `env FCGI_ALLOW_*` 传入（逗号分隔，避免 JSON 花括号被当 placeholder）      |
-| 脚本扩展名      | `.ts .js .mjs .tsx .jsx`；JSX 需要用户在自己的 `deno.json` 配 `compilerOptions.jsx` |
+| 决策            | 结论                                                                           |
+| --------------- | ------------------------------------------------------------------------------ |
+| 脚本形态        | 两种自动识别：`export default { fetch }` 常驻复用；顶层执行式每请求新建        |
+| 执行模型        | 常驻 1–2 ms；顶层执行式每请求重建 Worker（~30 ms），模块状态不跨请求           |
+| `Deno.env` 兼容 | Proxy 注入，每请求指向当前请求的 env                                           |
+| 权限边界        | `DOCUMENT_ROOT` 同时当路径与边界，不需要额外目录配置                           |
+| 读权限默认值    | 整个 `DOCUMENT_ROOT`，本地 `import "./x.ts"` 可用                              |
+| 权限配置位置    | 由 Caddy `env FCGI_ALLOW_*` 传入（逗号分隔，避免 JSON 花括号被当 placeholder） |
+| 脚本扩展名      | `.ts .js .mjs .tsx .jsx .php`；JSX 需要用户在自己的 `deno.json` 配 JSX 选项    |
 
 ## 13. JSX 说明
 
