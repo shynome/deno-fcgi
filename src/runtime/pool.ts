@@ -188,6 +188,7 @@ export class WorkerPool {
     const effective = resolvePermissions(
       permissions ?? this.options.defaultPermissions,
       job.scriptPath,
+      job.env["DOCUMENT_ROOT"],
     );
     // 空壳 Worker 与脚本无关，预热池只按权限配置区分
     const workerKey = JSON.stringify(effective);
@@ -699,12 +700,18 @@ function createReadyWorker(
 }
 
 /**
- * 保证脚本文件本身可读，其余权限原样保留。
- * 配置了 FCGI_ALLOW_READ 时，用户不需要再把脚本目录写进去。
+ * 合并脚本级权限。
+ *
+ * read 的默认值从「单个脚本文件」放宽到「整个 DOCUMENT_ROOT」，这样脚本可以做
+ * `import "./helper.ts"`、读同一站点里的模板/配置文件，行为更接近 PHP。
+ *
+ * 用户显式配了 `FCGI_ALLOW_READ` 时以用户的为准（不再叠加 webroot），
+ * 但仍然保证脚本自己能被加载。
  */
 function resolvePermissions(
   permissions: Deno.PermissionOptions,
   scriptPath: string,
+  documentRoot?: string,
 ): Deno.PermissionOptions {
   if (typeof permissions === "string") {
     throw new Error(
@@ -713,10 +720,19 @@ function resolvePermissions(
   }
   if (permissions.read === true) return permissions;
 
-  const read = Array.isArray(permissions.read) ? permissions.read : [];
+  let read: Array<string | URL>;
+  if (Array.isArray(permissions.read)) {
+    read = [...permissions.read, scriptPath];
+  } else if (permissions.read === false) {
+    // 显式禁止：至少要能加载脚本自身，否则连 bootstrap 都跑不起来
+    read = [scriptPath];
+  } else {
+    read = [documentRoot || scriptPath];
+  }
+
   return {
     ...permissions,
-    read: [...new Set([...read, scriptPath])],
+    read: [...new Set(read)],
   };
 }
 

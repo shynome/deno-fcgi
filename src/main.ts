@@ -3,7 +3,9 @@
  *
  * 用法：
  *   deno run --allow-read --allow-net --allow-env --unstable-worker-options \
- *     jsr:@shynome/deno-fastcgi --listen unix:/run/deno-fastcgi.sock --root /srv/site/scripts
+ *     jsr:@shynome/deno-fastcgi --listen unix:/run/deno-fastcgi.sock
+ *
+ * 可执行范围由 Caddy 传来的 DOCUMENT_ROOT 决定，不需要额外配置。
  */
 import { FcgiServer, type Logger } from "./fcgi/server.ts";
 import { Router } from "./router.ts";
@@ -13,7 +15,6 @@ const VERSION = "0.1.0";
 
 interface CliOptions {
   listen: string;
-  roots: string[];
   maxWorkers: number;
   prewarm: number;
   timeoutMs: number;
@@ -49,7 +50,6 @@ export class ConsoleLogger implements Logger {
 export function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     listen: "unix:/tmp/deno-fastcgi.sock",
-    roots: [],
     maxWorkers: 16,
     prewarm: 1,
     timeoutMs: 30_000,
@@ -68,15 +68,10 @@ export function parseArgs(argv: string[]): CliOptions {
       if (value === undefined) throw new Error(`missing value for ${arg}`);
       return value;
     };
-
     switch (arg) {
       case "--listen":
       case "-l":
         options.listen = next();
-        break;
-      case "--root":
-      case "-r":
-        options.roots.push(next());
         break;
       case "--max-workers":
         options.maxWorkers = Number(next());
@@ -108,23 +103,20 @@ export function parseArgs(argv: string[]): CliOptions {
         options.version = true;
         break;
       default:
-        if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
-        options.roots.push(arg);
+        throw new Error(`unknown argument: ${arg}`);
     }
   }
 
-  if (options.roots.length === 0) options.roots.push(Deno.cwd());
   return options;
 }
 
 function printHelp(): void {
   console.log(`deno-fastcgi ${VERSION}
 
-用法: deno-fastcgi [选项] [root...]
+用法: deno-fastcgi [选项]
 
 选项:
   -l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fastcgi.sock）
-  -r, --root <path>       允许执行脚本的根目录，可多次指定（默认当前目录）
       --max-workers <n>   同时运行的 Worker 上限（默认 16）
       --prewarm <n>       每个脚本保留的空壳数（默认 1）
       --timeout <ms>      单请求超时（默认 30000）
@@ -134,6 +126,8 @@ function printHelp(): void {
       --log-level <level> debug | info | error（默认 info）
   -h, --help              显示帮助
   -v, --version           显示版本
+
+可执行范围由 Caddy 传来的 DOCUMENT_ROOT 决定，不需要额外目录配置。
 
 运行脚本需要权限:
   --allow-read --allow-net --allow-env --unstable-worker-options
@@ -187,13 +181,9 @@ async function main(): Promise<void> {
 
   const logger = new ConsoleLogger(options.logLevel);
 
-  const roots = await Promise.all(
-    options.roots.map((root) => Deno.realPath(root)),
-  );
   logger.info("starting deno-fastcgi", {
     version: VERSION,
     listen: options.listen,
-    roots,
   });
 
   // 默认零权限。脚本自身的 read 由 pool 按实际脚本路径追加，
@@ -214,7 +204,7 @@ async function main(): Promise<void> {
 
   const server = new FcgiServer({
     listener: createListener(options.listen),
-    router: new Router({ roots }),
+    router: new Router(),
     pool,
     logger,
     maxBodyBytes: options.maxBodyBytes,

@@ -30,11 +30,6 @@ export class RouteError extends Error {
   }
 }
 
-export interface RouterOptions {
-  /** 允许执行脚本的根目录，必须已经 realPath */
-  roots: string[];
-}
-
 /**
  * 路由缓存的有效期。
  *
@@ -47,15 +42,16 @@ const RESOLVE_CACHE_MAX = 512;
 
 interface CachedRoute {
   realPath: string;
-  root: string;
+  /** 给脚本用的 DOCUMENT_ROOT（Caddy 传来的原值） */
+  documentRoot: string;
   expireAt: number;
 }
 
 export class Router {
   /** targetPath → 已校验的真实路径，只存成功结果（错误不缓存） */
   #cache = new Map<string, CachedRoute>();
-
-  constructor(private readonly options: RouterOptions) {}
+  /** DOCUMENT_ROOT → realPath 解析结果，站点数很少，命中率极高 */
+  #docRoots = new Map<string, string | null>();
 
   /**
    * 依据 FastCGI 参数解析出要执行的脚本。
@@ -88,9 +84,10 @@ export class Router {
     if (cached && cached.expireAt > performance.now()) {
       return {
         scriptPath: cached.realPath,
-        scriptName: scriptName || toScriptName(cached.realPath, cached.root),
+        scriptName: scriptName ||
+          toScriptName(cached.realPath, cached.documentRoot),
         pathInfo,
-        documentRoot: cached.root,
+        documentRoot: cached.documentRoot,
       };
     }
 
@@ -100,23 +97,44 @@ export class Router {
       throw new RouteError(404, `script not found: ${candidate}`);
     }
 
-    const root = this.matchRoot(realPath);
-    if (!root) {
-      throw new RouteError(403, `script outside allowed roots: ${realPath}`);
+    const documentRoot = params["DOCUMENT_ROOT"] ?? "";
+    const boundary = await this.#matchDocumentRoot(realPath, documentRoot);
+    if (!boundary) {
+      throw new RouteError(403, `script outside document root: ${realPath}`);
     }
 
+    // 给脚本的 DOCUMENT_ROOT 用 Caddy 传的原值（逻辑路径），
+    // 它比 realPath 更适合脚本拼绝对路径
     this.#remember(targetPath, {
       realPath,
-      root,
+      documentRoot: documentRoot || boundary,
       expireAt: performance.now() + RESOLVE_CACHE_TTL_MS,
     });
 
     return {
       scriptPath: realPath,
-      scriptName: scriptName || toScriptName(realPath, root),
+      scriptName: scriptName || toScriptName(realPath, boundary),
       pathInfo,
-      documentRoot: root,
+      documentRoot: documentRoot || boundary,
     };
+  }
+
+  /** 用 Caddy 传的 DOCUMENT_ROOT 做边界校验 */
+  async #matchDocumentRoot(
+    realPath: string,
+    documentRoot: string,
+  ): Promise<string | null> {
+    if (!documentRoot) return null;
+
+    let realDocRoot = this.#docRoots.get(documentRoot);
+    if (realDocRoot === undefined) {
+      realDocRoot = await realPathOrNull(documentRoot);
+      this.#docRoots.set(documentRoot, realDocRoot);
+    }
+    if (!realDocRoot) return null;
+    if (realPath === realDocRoot) return realDocRoot;
+    const prefix = realDocRoot.endsWith("/") ? realDocRoot : `${realDocRoot}/`;
+    return realPath.startsWith(prefix) ? realDocRoot : null;
   }
 
   #remember(key: string, entry: CachedRoute): void {
@@ -156,15 +174,6 @@ export class Router {
       if (candidateStat?.isFile) return candidate;
     }
     throw new RouteError(404, `script not found: ${targetPath}`);
-  }
-
-  private matchRoot(realPath: string): string | null {
-    for (const root of this.options.roots) {
-      if (realPath === root) return root;
-      const prefix = root.endsWith("/") ? root : `${root}/`;
-      if (realPath.startsWith(prefix)) return root;
-    }
-    return null;
   }
 }
 

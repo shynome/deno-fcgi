@@ -26,7 +26,7 @@ Deno.test("Router 解析存在的脚本", async () => {
   await Deno.writeTextFile(`${root}/index.ts`, "");
   await Deno.writeTextFile(`${root}/api/hello.ts`, "");
 
-  const router = new Router({ roots: [await Deno.realPath(root)] });
+  const router = new Router();
   const route = await router.resolve({
     SCRIPT_FILENAME: `${root}/api/hello.ts`,
     SCRIPT_NAME: "/api/hello.ts",
@@ -49,11 +49,25 @@ Deno.test("Router 拒绝越界与不存在", async () => {
   const root = await Deno.makeTempDir();
   const outside = await Deno.makeTempDir();
   await Deno.writeTextFile(`${outside}/evil.ts`, "");
-  const router = new Router({ roots: [await Deno.realPath(root)] });
+  await Deno.writeTextFile(`${root}/index.ts`, "");
+  const router = new Router();
 
+  // 脚本在 DOCUMENT_ROOT 之外 → 403
   let status = 0;
   try {
-    await router.resolve({ SCRIPT_FILENAME: `${outside}/evil.ts` });
+    await router.resolve({
+      SCRIPT_FILENAME: `${outside}/evil.ts`,
+      DOCUMENT_ROOT: root,
+    });
+  } catch (error) {
+    status = error instanceof RouteError ? error.status : -1;
+  }
+  assertEquals(status, 403);
+
+  // 没传 DOCUMENT_ROOT → 无权判断边界，同样拒绝
+  status = 0;
+  try {
+    await router.resolve({ SCRIPT_FILENAME: `${root}/index.ts` });
   } catch (error) {
     status = error instanceof RouteError ? error.status : -1;
   }
@@ -61,7 +75,10 @@ Deno.test("Router 拒绝越界与不存在", async () => {
 
   status = 0;
   try {
-    await router.resolve({ SCRIPT_FILENAME: `${root}/missing.ts` });
+    await router.resolve({
+      SCRIPT_FILENAME: `${root}/missing.ts`,
+      DOCUMENT_ROOT: root,
+    });
   } catch (error) {
     status = error instanceof RouteError ? error.status : -1;
   }
@@ -74,11 +91,14 @@ Deno.test("Router 拒绝越界与不存在", async () => {
 Deno.test("Router 拒绝非脚本扩展名", async () => {
   const root = await Deno.makeTempDir();
   await Deno.writeTextFile(`${root}/secret.txt`, "x");
-  const router = new Router({ roots: [await Deno.realPath(root)] });
+  const router = new Router();
 
   let status = 0;
   try {
-    await router.resolve({ SCRIPT_FILENAME: `${root}/secret.txt` });
+    await router.resolve({
+      SCRIPT_FILENAME: `${root}/secret.txt`,
+      DOCUMENT_ROOT: root,
+    });
   } catch (error) {
     status = error instanceof RouteError ? error.status : -1;
   }

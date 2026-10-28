@@ -128,7 +128,8 @@ DOCUMENT_ROOT     /srv/site
 解析流程：
 
 1. `SCRIPT_FILENAME` 为空时回退 `DOCUMENT_ROOT + SCRIPT_NAME`
-2. `realPath(SCRIPT_FILENAME)`，必须位于允许的 root 内（防 `..` 与符号链接逃逸）
+2. `realPath(SCRIPT_FILENAME)`，解析软链接后校验它位于 `realPath(DOCUMENT_ROOT)` 之内 （防 `..`
+   与符号链接逃逸）
 3. 判定：
    - 是文件且扩展名 ∈ `[.ts, .js, .mjs, .tsx, .jsx, .php]` → 执行 （`.tsx/.jsx` 需要 JSX
      编译配置，见 §11；`.php` 只能写纯 JS，因为 Deno 对未知扩展名按 JS 解析）
@@ -143,6 +144,19 @@ DOCUMENT_ROOT     /srv/site
 
 TTL 取 2 秒是为了和常驻脚本的热更新周期一致：新增脚本立即可见（首次不命中缓存）， **删除/改名后最长
 2 秒内仍会路由到旧路径**。
+
+### DOCUMENT_ROOT 既是路径也是边界
+
+`DOCUMENT_ROOT` 由 Caddy 从它自己的 `root` 指令生成，同时承担两个作用：
+
+1. 校验脚本没有跑到 webroot 之外
+2. 作为环境变量交给脚本拼绝对路径（如 `DOCUMENT_ROOT + "/data.txt"`）
+
+两个用途用的是**同一个值**，不做任何改写。早期实现曾把安全边界的结果写回
+`DOCUMENT_ROOT`，一旦边界配得比 webroot 深，脚本拼出来的路径就全错了，已修正。
+
+边界校验会先把 `DOCUMENT_ROOT` 也 `realPath` 一次（带小缓存），因为 webroot 本身可能是软链接。 未传
+`DOCUMENT_ROOT` 时直接 403 —— 没有基准就无从判断，不默认信任 `SCRIPT_FILENAME`。
 
 ---
 
@@ -249,7 +263,8 @@ console.log(`hello ${name ?? "world"}, method=${method}`);
 ```
 
 - 每次请求都重新 `import(scriptUrl)`，顶层代码重新求值
-- Worker 的 read 只给当前脚本文件，所以相对导入会失败（单文件脚本）
+- Worker 的 read 默认是整个 `DOCUMENT_ROOT`，所以相对导入和读站点内文件都能用； 站点之外仍然
+  `NotCapable`
 - DB 连接等资源每请求新建、随 Worker 销毁释放（与 PHP 一致）
 - 需要跨请求共享状态时，用外部服务（redis / 数据库），不在进程内缓存
 
@@ -338,8 +353,17 @@ interface PoolOptions {
 路由覆盖         = FCGI_ALLOW_* 与默认值合并
 ```
 
-`read` 精确到单个脚本文件，所以脚本能加载自己，但 `import "./x.ts"` 会 `NotCapable`。
-这是“支持单文件、不支持本地 import”的天然实现，无需 data URL。
+`read` 默认是整个 `DOCUMENT_ROOT`（边界就是上面路由用的那个值），所以脚本能加载自己、
+`import "./x.ts"`、读同站点的模板/配置，但读不到站点之外的东西。
+
+早期实现只放行单个脚本文件，导致本地 import 不可用。现在的合并规则：
+
+| `FCGI_ALLOW_READ` | 最终 `read`                                               |
+| ----------------- | --------------------------------------------------------- |
+| 未配              | `[DOCUMENT_ROOT]`                                         |
+| `none` / `false`  | `[scriptPath]`（至少能加载自己，否则 bootstrap 跑不起来） |
+| 具体路径列表      | 用户列表 + `scriptPath`（**不**额外叠加 webroot）         |
+| `*` / `all`       | 全放开                                                    |
 
 Caddy 侧在 `transport fastcgi` 块里用 `env` 声明（每条路由可不同）：
 
@@ -461,8 +485,9 @@ example.com {
 唯一与 `.php` 绑定的限制是**模块类型**：Deno 按扩展名判定模块类型，`.php` 被当作 JavaScript，不能写
 TS 类型注解。直接放编译后的 JS 即可。
 
-另一个连带影响：`read` 只精确到单个脚本文件，所以 `import "./x.ts"` 会失败（单文件脚本）。
-`import.meta.url` 是正常的 `file://` URL，可用于定位自身。
+另一个连带影响：`read` 默认放行整个 `DOCUMENT_ROOT`，所以 `.php` 脚本同样可以 `import "./helper.js"`
+（注意扩展名要写 `.js` 或 `.php`，Deno 按扩展名判定模块类型）。 `import.meta.url` 是正常的 `file://`
+URL，可用于定位自身。
 
 - `capture_stderr` 同样属于 `transport fastcgi` 块
 

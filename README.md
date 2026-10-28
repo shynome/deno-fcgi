@@ -33,19 +33,19 @@ curl 'http://localhost:8080/api/hello.ts/users/42'
 - 真正的 CGI 语义：每次请求一个全新 Worker isolate，脚本顶层代码重新执行
 - 脚本里直接用 `process.env`、`console.log`、`Deno.stdin` 读写 CGI 数据
 - 两种脚本形态：`export default { fetch }`（常驻复用）与顶层执行式（PHP 风格）
-- 默认零权限：只放行当前脚本文件的 `read`，其他读 / 联网 / 写 / 子进程需显式放开
-- 单文件脚本：不支持 `import "./x.ts"`
+- 默认零权限，只自动放行 `DOCUMENT_ROOT` 的 `read`；联网 / 写 / 子进程需显式放开
+- 脚本可以 `import "./helper.ts"`、读同一站点里的模板和配置
 - `deno compile` 可打包成单文件二进制
 
 ## 快速开始
 
 ```bash
 # 1. 启动 FastCGI 服务端
+# 不需要 --root：默认以 Caddy 传来的 DOCUMENT_ROOT 为边界
 deno run --allow-read --allow-net --allow-env --allow-write \
   --unstable-worker-options \
   jsr:@shynome/deno-fastcgi \
-  --listen unix:/run/deno-fastcgi.sock \
-  --root /srv/site/public
+  --listen unix:/run/deno-fastcgi.sock
 
 # 2. Caddy 侧
 ```
@@ -113,8 +113,8 @@ example.com {
 
 ## 脚本怎么写
 
-**脚本是单文件的**：Worker 的 `read` 权限只精确到当前脚本这一个文件，所以 `import "./x.ts"`
-这类本地相对导入会 `NotCapable`（`npm:` / `jsr:` / `https:` 依赖正常）。
+Worker 的 `read` 权限默认是整个 **`DOCUMENT_ROOT`**，所以脚本可以 `import "./helper.ts"`、
+读取同一站点里的模板 / 配置文件，但读不到站点之外的任何东西。
 
 支持两种形态，宿主自动识别：
 
@@ -308,9 +308,8 @@ reverse_proxy @api unix//run/deno-fastcgi.sock {
 
 ### 要点
 
-- 默认权限是 `{}`，但 Worker 会自动获得**当前脚本文件本身**的 `read`（不配置什么都能跑）。
-- 因为 `read` 精确到单个文件，脚本**不能 `import "./x.ts"`**，只能写单文件。
-- 写了 `FCGI_ALLOW_READ` 时，它与脚本自身的 `read` 合并，不是覆盖。
+- 默认权限是 `{}`，但 Worker 会自动获得整个 `DOCUMENT_ROOT` 的 `read`（不配什么都能跑）。
+- 显式写了 `FCGI_ALLOW_READ` 时，以你的为准（不再叠加 webroot），但仍保证脚本自己能加载。
 - **未列出的权限类型全部拒绝**（Deno 的语义）。只写 `FCGI_ALLOW_READ`
   就等于同时禁掉了网络、写文件、子进程。
 - 所有 `FCGI_*` 变量在注入给脚本前会被剥离，脚本看不到。
@@ -347,7 +346,6 @@ env FCGI_ALLOW_WRITE /srv/site/uploads
 
 ```
 -l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fastcgi.sock）
--r, --root <path>       脚本根目录，可多次指定（默认当前目录）
     --max-workers <n>   并发 Worker 上限（默认 16）
     --prewarm <n>       每个脚本保留的空壳数（默认 1）
     --timeout <ms>      单请求超时（默认 30000）
@@ -372,7 +370,7 @@ env FCGI_ALLOW_WRITE /srv/site/uploads
 
 ```bash
 deno task test
-deno task dev --root examples/site/public --listen unix:/tmp/deno-fastcgi.sock
+deno task dev --listen unix:/tmp/deno-fastcgi.sock
 
 # 另开一个终端
 caddy run --config examples/caddy/Caddyfile --adapter caddyfile
