@@ -1,0 +1,23 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:hono-cgi-adapter@*": "0.1.1_typescript@6.0.3",
+    "npm:hono@4": "4.13.13"
+  },
+  "npm": {
+    "hono-cgi-adapter@0.1.1_typescript@6.0.3": {
+      "integrity": "sha512-rzpUiawY2CIQO7GwpaBh8Zf1nIxAEqSLI6VCbMmSW8ZMnHqBWlU2505kqopTbgbPQEeBMrYCtE9tLY3yKctyGA==",
+      "dependencies": [
+        "hono",
+        "typescript"
+      ]
+    },
+    "hono@4.13.13": {
+      "integrity": "sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA=="
+    },
+    "typescript@6.0.3": {
+      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+      "bin": true
+    }
+  }
+}

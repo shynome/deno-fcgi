@@ -1,0 +1,47 @@
+:8080 {
+	root * /home/shynome/work/github.com/shynome/deno-fastcgi/examples/site/public
+
+	route {
+		# 目录请求补尾斜杠：/api -> /api/
+		@canonicalPath {
+			file {path}/index.ts
+			not path */
+		}
+		redir @canonicalPath {http.request.orig_uri.path}/ 308
+
+		# 文件存在则 rewrite 到该文件；split_path 让 /a/hello.ts/extra 命中 /a/hello.ts
+		@scriptFiles file {
+			try_files {path} {path}/index.ts
+			try_policy first_exist_fallback
+			split_path .ts
+		}
+		rewrite @scriptFiles {file_match.relative}
+
+		# 降权示例：只有 /secure/ 下的脚本被限制权限（不能读系统文件 / 不能联网）
+		@secure path /secure/*.ts*
+		reverse_proxy @secure unix//tmp/deno-fastcgi.sock {
+			transport fastcgi {
+				split .ts
+				capture_stderr
+				env FCGI_ALLOW_READ /home/shynome/work/github.com/shynome/deno-fastcgi/examples/site/public/secure
+			}
+		}
+
+		# 其余脚本继承服务端权限（可以加载 npm 依赖、访问网络等）
+		@scripts {
+			path *.ts*
+			not path /secure/*
+		}
+		reverse_proxy @scripts unix//tmp/deno-fastcgi.sock {
+			transport fastcgi {
+				split .ts
+				capture_stderr
+			}
+		}
+	}
+
+	file_server {
+		# 绝不能把脚本源码当静态文件下发
+		hide *.ts *.tsx *.jsx *.php
+	}
+}

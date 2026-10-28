@@ -1,0 +1,6 @@
+# 最小配置：3 行
+:8081 {
+	root * /home/shynome/work/github.com/shynome/deno-fastcgi/examples/php-site/public
+	php_fastcgi unix//tmp/deno-fastcgi-php.sock
+	file_server
+}

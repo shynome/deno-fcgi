@@ -1,0 +1,1 @@
+this file is readable inside the sandboxed directory

@@ -1,0 +1,539 @@
+# deno-fastcgi 设计文档
+
+面向 Deno 脚本的 FastCGI 服务端，放在 Caddy 后面，行为尽量贴近 PHP-FPM： **URL
+路径直接映射到磁盘上的脚本文件**，无需把每个脚本单独注册成服务。
+
+---
+
+## 1. 目标与非目标
+
+### 目标
+
+- 实现标准 FastCGI responder，Caddy 通过 `transport fastcgi` 接入
+- 多脚本：`/api/hello.ts`、`/admin/index.ts` 各自独立运行，无需重启服务
+- CGI 风格脚本：脚本内直接读 `process.env` / `Deno.stdin`，用 `console.log` 输出响应
+- 脚本级权限隔离：每个脚本只能访问配置允许的路径 / 域名
+- 单进程常驻，每请求一个一次性 Worker；`deno compile` 出单文件二进制
+
+### 非目标（第一版）
+
+- 不做 asgi / wsgi 兼容层
+- 不做集群 / 多机负载均衡（Caddy 侧可用 upstream 池）
+- 不实现 FastCGI 的 `FILTER` 角色，只做 `RESPONDER`
+- 不自动安装依赖，脚本依赖由用户自己的 `deno.json` / import map 决定
+
+---
+
+## 2. 整体架构
+
+```
+                    ┌──────────────────────────────────────────┐
+Browser ──HTTP──> Caddy ──FastCGI(unix socket)──> deno-fastcgi │
+                    └──────────────────────────────────────────┘
+                                   │
+                  ┌────────────────┴────────────────┐
+                  │  main (Deno, 单进程)             │
+                  │  ├─ fcgi/protocol   帧编解码      │
+                  │  ├─ fcgi/server     连接状态机    │
+                  │  ├─ router          路径 → 脚本   │
+                  │  └─ pool            并发控制      │
+                  └────────────────┬────────────────┘
+                                   │ 每请求一个全新 Worker
+                  ┌────────────────┴────────────────┐
+                  │  Worker (一次性 isolate)         │
+                  │  ├─ bootstrap: 注入 CGI 上下文    │
+                    │  └─ import(file://脚本) → 顶层执行 │
+                  └─────────────────────────────────┘
+```
+
+### 为什么不用 `Deno.serve`
+
+FastCGI 是二进制协议（8 字节定长帧头），`Deno.serve` 只处理 HTTP。 主进程用
+`Deno.listen({ transport: "unix", path })` 收裸 TCP 流，自己解析帧。
+
+### 为什么用 Worker 而不是子进程
+
+- 冷启动：Worker ≈ 5–20ms，子进程 ≈ 40–100ms
+- 内存：Worker 共享主进程堆外资源，子进程每个独立 V8 实例
+- 权限：Worker 支持 `deno.permissions` 降级（需 `--unstable-worker-options`）
+
+代价是 `Deno.env` 是进程级共享的，因此需要下面的「隔离补丁」。
+
+---
+
+## 3. FastCGI 协议层
+
+### 帧格式
+
+```
+version:1 type:1 requestId:2 contentLength:2 paddingLength:1 reserved:1
+```
+
+需要实现的 type：
+
+| type              | 方向         | 说明                                      |
+| ----------------- | ------------ | ----------------------------------------- |
+| BEGIN_REQUEST (1) | Caddy → 我们 | role + flags(keep_conn)                   |
+| ABORT_REQUEST (2) | Caddy → 我们 | 中断请求（客户端断开）                    |
+| PARAMS (4)        | Caddy → 我们 | 逐帧到达，以空帧结束                      |
+| STDIN (5)         | Caddy → 我们 | 请求体，以空帧结束                        |
+| STDOUT (6)        | 我们 → Caddy | 响应数据                                  |
+| STDERR (7)        | 我们 → Caddy | 脚本错误输出，Caddy `capture_stderr` 记录 |
+| END_REQUEST (3)   | 我们 → Caddy | appStatus + protocolStatus                |
+| GET_VALUES (9)    | Caddy → 我们 | 可选，返回少量能力声明                    |
+
+### 连接模型
+
+- 一条连接上可多路复用多个 `requestId`（`keep_conn` 时必须支持）
+- 每个连接维护 `Map<requestId, RequestState>`，独立状态机：
+  `WAIT_PARAMS → WAIT_STDIN → RUNNING → DONE`
+- 并发上限：`--max-requests-per-conn`，超出时按 `OVERLOADED` 结束请求
+- 背压：STDOUT 写入走 `Deno.Writer.write` 并 `await`，不无限缓冲
+
+### 关键常量
+
+```
+FCGI_VERSION = 1
+FCGI_RESPONDER = 1
+FCGI_REQUEST_COMPLETE = 0
+FCGI_CANT_MPX_CONN = 1
+FCGI_OVERLOADED = 2
+FCGI_UNKNOWN_ROLE = 3
+FCGI_MAX_LENGTH = 65535
+```
+
+### 响应写出
+
+1. 脚本输出前若干字节，解析出 CGI 头，直到 `\r\n\r\n`
+2. 头转成 CGI 响应：`Status: 404 Not Found` 直接作为状态；缺省 200
+3. 之后的数据边收边包成 STDOUT 帧（每帧 ≤ 65535 字节，惯例 32KB）
+4. 全部结束时发空 STDOUT 帧 + END_REQUEST
+
+> 注意：Caddy 侧 FastCGI **不支持 chunked 请求体**，无 `Content-Length` 的请求会被 411。 这是 Caddy
+> 的限制，不是本项目的，需在 README 说明。
+
+---
+
+## 4. 路由规则
+
+以 Caddy 通过 PARAMS 传来的变量为准：
+
+```
+SCRIPT_FILENAME   /srv/site/api/hello.ts     ← 主依据
+SCRIPT_NAME       /api/hello.ts
+PATH_INFO         /bar/baz                   ← 可能为空
+DOCUMENT_ROOT     /srv/site
+```
+
+解析流程：
+
+1. `SCRIPT_FILENAME` 为空时回退 `DOCUMENT_ROOT + SCRIPT_NAME`
+2. `realPath(SCRIPT_FILENAME)`，必须位于允许的 root 内（防 `..` 与符号链接逃逸）
+3. 判定：
+   - 是文件且扩展名 ∈ `[.ts, .js, .mjs, .tsx, .jsx, .php]` → 执行 （`.tsx/.jsx` 需要 JSX
+     编译配置，见 §11；`.php` 只能写纯 JS，因为 Deno 对未知扩展名按 JS 解析）
+   - 是目录 → 尝试 `<dir>/index.ts`
+   - 都不满足 → 404（可选：回退 `DOCUMENT_ROOT/index.ts`，由 Caddy `try_files` 控制）
+4. `PATH_INFO` 原样放进环境变量，交给脚本自行路由（Hono 可吃）
+
+### 路由缓存
+
+`resolve` 每次要 2 次文件系统调用（探测候选 + `realPath` 解析软链接），所以结果按 `targetPath` 缓存
+2 秒，上限 512 条（只存成功结果，错误不缓存）。
+
+TTL 取 2 秒是为了和常驻脚本的热更新周期一致：新增脚本立即可见（首次不命中缓存）， **删除/改名后最长
+2 秒内仍会路由到旧路径**。
+
+---
+
+## 5. 脚本运行时（CGI 语义注入）
+
+脚本就是一个普通 Deno 脚本，不 import 任何宿主 SDK 也能跑：
+
+```ts
+// public/api/hello.ts
+const method = process.env.REQUEST_METHOD;
+const name = new URL("http://x" + process.env.REQUEST_URI).searchParams.get("name");
+
+console.log("Content-Type: text/plain; charset=utf-8");
+console.log("");
+console.log(`hello ${name ?? "world"}, method=${method}`);
+```
+
+Worker 的 bootstrap 在 import 脚本前做这些事：
+
+| 注入对象              | 做法                                                                              | 实测                                         |
+| --------------------- | --------------------------------------------------------------------------------- | -------------------------------------------- |
+| `process.env`         | 复用同一个普通对象，每请求清空再填充                                              | ✅ 不影响主线程                              |
+| `Deno.stdin`          | `defineProperty` 替换为内存 body 的 reader                                        | ✅                                           |
+| `Deno.stdout`         | 替换为把字节追加到响应缓冲的 writer                                               | ✅                                           |
+| `Deno.stderr`         | 替换为发 FCGI_STDERR 的 writer                                                    | ✅                                           |
+| `console`             | 整体替换，`log/info/debug → stdout`，`warn/error → stderr`                        | ✅ console 不走 `Deno.stdout`，必须单独 hook |
+| `Deno.env`            | 替换 `globalThis.Deno` 为浅代理，`env.get/set/toObject` 转发到当前请求的 env 对象 | ✅                                           |
+| 全局 `Buffer`         | 从 `node:buffer` 注入，供 Node 生态库使用                                         | ✅                                           |
+| `process.stdout.push` | 作为 `write` 的别名（部分适配器会误用 `push`）                                    | ✅                                           |
+
+常驻 Worker 下这套注入是**每请求**都要做的，所以 Proxy、console、各个流对象都在模块级
+只创建一次，每请求只换内部指向的 `RequestState`（env 清空再填充、offset/out/err 重置、
+新建可读流）。可读流直接闭包捕获本次的 `RequestState`，避免延迟读取时串到新请求。 把
+`defineProperty` 和对象构造从热路径上拿掉后，这部分开销已可以忽略不计。
+
+### 第三方适配器兼容
+
+已验证 [hono-cgi-adapter](https://github.com/taisan11/hono-cgi-adapter)：
+
+```ts
+import { Hono } from "npm:hono@^4";
+import { handlecgi } from "npm:hono-cgi-adapter";
+
+const app = new Hono();
+app.get("/", (c) => c.text("Hello"));
+await handlecgi(app, process.env);
+```
+
+它依赖 `process.stdin` 的 async iterator、`process.stdout.write/push`、全局 `Buffer`、
+`process.env`，这些均由 bootstrap 提供。
+
+注意该适配器只把 `PATH_INFO` 当作请求路径，且不会拼接 `QUERY_STRING`：
+
+| 浏览器访问             | Hono 看到的路径 |
+| ---------------------- | --------------- |
+| `/api/hono.ts`         | `/`             |
+| `/api/hono.ts/users/1` | `/users/1`      |
+
+`examples/` 下所有示例均采用这种写法。
+
+npm/jsr 模块的下载与缓存读取是 Deno 加载器行为，不受脚本权限约束， 降权目录里也能正常加载；需要
+`read` 权限的只有本地相对路径模块。
+
+### 环境变量清单
+
+标准 CGI 变量全部注入：`GATEWAY_INTERFACE`、`SERVER_SOFTWARE`、`SERVER_PROTOCOL`、
+`REQUEST_METHOD`、`REQUEST_URI`、`QUERY_STRING`、`CONTENT_TYPE`、`CONTENT_LENGTH`、
+`SCRIPT_FILENAME`、`SCRIPT_NAME`、`PATH_INFO`、`PATH_TRANSLATED`、`DOCUMENT_ROOT`、
+`REMOTE_ADDR`、`REMOTE_PORT`、`SERVER_ADDR`、`SERVER_PORT`、`SERVER_NAME`、`HTTPS`、 以及 `HTTP_*`
+形式的请求头。
+
+宿主进程自身的环境变量默认**不继承**，可用 `--inherit-env` 白名单开启。
+
+### 并发与全局状态
+
+`process.env` / `console` 的 hook 是 isolate 级全局，但我们**每请求都用一个全新 Worker**，
+所以不存在跨请求串扰，也不需要串行化队列。
+
+- 一个请求 = 一个 Worker isolate，跑完即弃
+- 并发数由 `maxWorkers` 限制，超出的请求排队或返回 `OVERLOADED`
+
+### 执行模型（重要）
+
+支持两种脚本形态，由 wrapper 自动识别：
+
+| 形态                                      | 判定                   | Worker 生命周期 | 热门请求耗时 |
+| ----------------------------------------- | ---------------------- | --------------- | ------------ |
+| `export default { fetch }`（含 Hono app） | `default.fetch` 是函数 | 常驻复用        | **1–2 ms**   |
+| 顶层执行式（PHP 风格）                    | 无 default 导出        | 每请求新建      | ~30 ms       |
+
+顶层执行式必须是新 isolate（模块只能求值一次）；`fetch` 形态则只需加载一次， 每请求构造标准
+`Request` 调用 `fetch`，输出由 wrapper 转成 CGI 字节流。
+
+两种形态下 `import.meta.url` 都是正常的 `file://` URL。
+
+```ts
+// public/api/hello.ts —— 顶层就是逻辑
+const method = process.env.REQUEST_METHOD;
+const name = new URL("http://x" + process.env.REQUEST_URI).searchParams.get("name");
+
+console.log("Content-Type: text/plain; charset=utf-8");
+console.log("");
+console.log(`hello ${name ?? "world"}, method=${method}`);
+```
+
+- 每次请求都重新 `import(scriptUrl)`，顶层代码重新求值
+- Worker 的 read 只给当前脚本文件，所以相对导入会失败（单文件脚本）
+- DB 连接等资源每请求新建、随 Worker 销毁释放（与 PHP 一致）
+- 需要跨请求共享状态时，用外部服务（redis / 数据库），不在进程内缓存
+
+---
+
+## 6. Worker 生命周期
+
+```ts
+interface PoolOptions {
+  maxWorkers: number; // 同时存活的 Worker 上限，默认 16
+  prewarm: number; // 每个 empty 空壳数，默认 1
+  requestTimeoutMs: number; // 单请求超时，默认 30_000
+  defaultPermissions: Deno.PermissionOptions; // 默认 {}，脚本文件 read 自动追加
+  residentConcurrency: number; // 单脚本常驻 Worker 上限，默认 4
+  residentIdleMs: number; // 空闲 Worker 回收，默认 30_000，负=不回收；最后一个按 5 倍
+}
+```
+
+两套 key，不要混：
+
+- `workerKey = JSON.stringify(权限)`：空壳与脚本无关，预热池按它分组
+- `residentKey = workerKey + "|" + scriptPath`：常驻槽必须带路径，否则 `read=*` 时不同脚本会共用一个
+  Worker
+
+生命周期：
+
+- **ephemeral**（无 default 导出）：每请求新建 Worker，结束后 `terminate()`；
+  请求结束后异步补一个已就绪的空壳，下次同 `workerKey` 直接命中，省掉约 8ms isolate 初始化。
+  空壳总数受 `maxWorkers` 约束，并且空闲超过 `residentIdleMs` 也会被清扫（懒检查 +
+  定时器），避免每种权限配置各攒一个把内存撑大
+- **resident**（有 `default.fetch`）：按需扩容的 Worker 池，见下节
+- 同时运行数达 `maxWorkers` → 排队；超时的 Worker 直接 `terminate()`，请求返回 504
+
+### 常驻并发池
+
+单个 Worker 内部**必须串行**：CGI 上下文注入改的是 `globalThis.Deno` / `console`，
+两个请求同时跑会互相污染。所以并发只能靠多个 Worker。
+
+调度顺序：全局许可 → 脚本信号量（`residentConcurrency`）→ 挑 `pending === 0` 的 Worker → 全忙则扩容
+→ 到上限则排队。
+
+先把全局许可拿到再等脚本信号量，保证不会出现“持着信号量干等全局槽”的白占。
+
+其他两个必需的保护：
+
+- **创建锁** `#createLocks`：并发首请求若各自走一遍加载路径，会建出多个 pool 互相覆盖， Worker
+  泄漏。现在同一个 `residentKey` 只有第一个请求加载，其余 `await` 它拿到 pool 后自己执行
+- **空闲回收**：多余的空闲 Worker 超过 `residentIdleMs` 就 terminate；**最近用过的那个
+  （“最后一个”）按 5 倍阈值**，避免热脚本刚冷下来就被回收。全空后从 `#resident` 摧掉、 停掉
+  revalidator，下次请求重新 bootstrap（多付 ~30 ms）。
+  调度按「最早到期的空闲槽」算，不轮询；已有定时器但新到期时间更早时会被重排—— 否则 bootstrap 挂的 5
+  倍定时器会把后续扩容出来的槽拖到很晚才回收
+
+实测 `await sleep(500)` 的接口：4 并发 495 ms，8 并发（上限 4）1074 ms。
+
+### 热重载
+
+两种形态机制不同：
+
+| 形态      | 机制                                                | 生效延迟   |
+| --------- | --------------------------------------------------- | ---------- |
+| ephemeral | 新 isolate 模块缓存为空，自动重读文件               | 下一个请求 |
+| resident  | 后台定时器 `stat` 比较 `mtime`+`size`，变了就 evict | ≤ 2 秒     |
+
+常驻模式对齐 PHP opcache 的默认语义（`validate_timestamps=1`、`revalidate_freq=2`）： **每 2 秒**在
+`setInterval` 里异步 `stat` 一次，请求路径上不做任何文件系统调用。
+
+为什么不在请求路径上 `stat`：单次 28 µs 虽然不贵，但它的收益（生效延迟从 2 秒变成 1 个请求）
+对开发体验的提升很有限，反而给每个生产请求都加了一次 syscall。后台校验把两者都顾上了。
+
+细节：
+
+- 有请求在跑（`pending > 0`）就跳过本轮，避免 terminate 掉正在执行的 Worker
+- `stat` 失败（文件被删）也视为 stale
+- 定时器只在存在常驻池时运行，`#resident` 空时自动 `clearInterval`
+- 池被后台校验丢弃时，在信号量里排队的请求会收到 `PoolDisposedError`，`run()` 重新走一轮
+- evict 后首个请求回到 ~30 ms（重新加载模块），之后又变回 1–2 ms
+
+---
+
+## 7. 权限模型
+
+```
+主进程 CLI 权限  = 全局上限（--allow-read / --allow-net ...）
+默认权限         = {}，但自动追加“当前脚本文件”的 read
+路由覆盖         = FCGI_ALLOW_* 与默认值合并
+```
+
+`read` 精确到单个脚本文件，所以脚本能加载自己，但 `import "./x.ts"` 会 `NotCapable`。
+这是“支持单文件、不支持本地 import”的天然实现，无需 data URL。
+
+Caddy 侧在 `transport fastcgi` 块里用 `env` 声明（每条路由可不同）：
+
+```caddyfile
+@api path /api/*
+reverse_proxy @api unix//run/deno-fastcgi.sock {
+    transport fastcgi {
+        split .ts
+        env FCGI_ALLOW_READ /srv/site/public
+        env FCGI_ALLOW_NET api.github.com,127.0.0.1:5432
+    }
+}
+```
+
+| 变量                                  | 取值                 | 说明       |
+| ------------------------------------- | -------------------- | ---------- |
+| `FCGI_ALLOW_READ`                     | 逗号分隔路径         | 文件读取   |
+| `FCGI_ALLOW_WRITE`                    | 逗号分隔路径         | 文件写入   |
+| `FCGI_ALLOW_NET`                      | `host` / `host:port` | 网络       |
+| `FCGI_ALLOW_ENV`                      | 逗号分隔变量名       | `Deno.env` |
+| `FCGI_ALLOW_RUN`                      | 逗号分隔命令         | 子进程     |
+| `FCGI_ALLOW_SYS`                      | 逗号分隔能力名       | 系统信息   |
+| `FCGI_ALLOW_FFI` / `HREAD` / `HWRITE` | 逗号分隔             | FFI 与句柄 |
+
+取值还支持：`*` / `all` 表示全放开，`none` / 空串表示禁止。
+
+> ⚠️ 不要用 JSON 写 `FCGI_PERMISSIONS`：Caddyfile 会把 `{...}` 当成 placeholder 吃掉。JSON
+> 形式仍保留，用于从环境变量 / 外部注入的场景。
+
+- 只要出现了任意一个 `FCGI_ALLOW_*`，未列出的权限类型均被拒绝（Deno 的默认语义）
+- 宿主会**自动**把自身源码目录追加进 read 白名单，否则 Worker 连 bootstrap 都加载不了
+- 所有 `FCGI_*` 变量不会注入给脚本
+- Worker 池 key 包含权限，权限变化自动分组
+- 缺省（一个不传）= 零权限，仅自动获得当前脚本文件的 read
+- 解析失败 → 500 + stderr
+- Worker 创建时传 `deno: { permissions }`，实测降级生效、提权被拒
+- 需要启动时加 `--unstable-worker-options`；缺失时整个请求会失败，启动时应告警
+
+---
+
+## 8. Caddy 配置
+
+脚本必须放在 Caddy 的 webroot 下——Caddy 要依靠文件是否存在来决定是否转发。 用
+`file_server { hide *.ts }` 防止源码被当静态文件下载。
+
+```
+/srv/site/public/
+  index.ts            ← 目录索引
+  api/hello.ts
+  static.html
+```
+
+```caddyfile
+example.com {
+    root * /srv/site/public
+
+    route {
+        # 目录请求补尾斜杠：/api -> /api/
+        @canonicalPath {
+            file {path}/index.ts
+            not path */
+        }
+        redir @canonicalPath {http.request.orig_uri.path}/ 308
+
+        # 文件存在则 rewrite；split_path 让 /a/hello.ts/extra 命中 /a/hello.ts
+        @scriptFiles file {
+            try_files {path} {path}/index.ts
+            try_policy first_exist_fallback
+            split_path .ts
+        }
+        rewrite @scriptFiles {file_match.relative}
+
+        @scripts path *.ts*
+        reverse_proxy @scripts unix//run/deno-fastcgi.sock {
+            transport fastcgi {
+                split .ts
+                capture_stderr
+                env FCGI_ALLOW_READ /srv/site/public
+            }
+        }
+    }
+
+    file_server {
+        hide *.ts *.tsx *.jsx
+    }
+}
+```
+
+- `split .ts`：`/api/hello.ts/extra` → `SCRIPT_NAME=/api/hello.ts`，`PATH_INFO=/extra`
+- `*` 而不是 `*.ts`：带 PATH_INFO 的请求尾巴不是 `.ts` 结尾
+- **不要用 `php_fastcgi` 简写**：它会用 `@indexFiles` 自己的 try_files，对 `/` 的 `{path}/index.ts`
+  拼成 `//index.ts` 导致根路径 404；展开形式才能正常处理
+- `env` 要写在 `transport fastcgi` 块内，值里不要出现 `{...}`（会被当 placeholder）
+- `capture_stderr` 同样属于 `transport fastcgi` 块
+
+### 最小配置：`.php` 后缀（3 行）
+
+```caddyfile
+:8081 {
+    root * /srv/site/public
+    php_fastcgi unix//run/deno-fastcgi.sock
+    file_server
+}
+```
+
+`php_fastcgi` 的默认约定正好契合我们的多脚本模型：`split .php`、`index.php` 兜底、
+目录补尾斜杠。实测行为（与展开形式一致）：
+
+| 请求             | 结果                                                |
+| ---------------- | --------------------------------------------------- |
+| `/`              | 200，执行 `index.php`                               |
+| `/api.php`       | 200                                                 |
+| `/api.php/extra` | 200，`PATH_INFO=/extra`                             |
+| `/nope.php`      | 200，兜底执行 `index.php`                           |
+| `/missing.css`   | 200，同样兜底执行 `index.php`（PHP 前端控制器模式） |
+
+需要真正的 404 就给 `try_files` 加 `=404`（配置多一行）。
+
+唯一与 `.php` 绑定的限制是**模块类型**：Deno 按扩展名判定模块类型，`.php` 被当作 JavaScript，不能写
+TS 类型注解。直接放编译后的 JS 即可。
+
+另一个连带影响：`read` 只精确到单个脚本文件，所以 `import "./x.ts"` 会失败（单文件脚本）。
+`import.meta.url` 是正常的 `file://` URL，可用于定位自身。
+
+- `capture_stderr` 同样属于 `transport fastcgi` 块
+
+---
+
+## 9. 项目结构
+
+```
+deno.json
+src/
+  main.ts              CLI 入口：参数解析、监听、信号处理
+  bytes.ts             字节拼接、跨线程 transfer 判定
+  router.ts            SCRIPT_FILENAME 解析、路径安全校验
+  types.ts             ScriptJob / ScriptResult 等跨线程结构
+  fcgi/
+    protocol.ts        帧常量、编码、解码
+    response.ts        CGI 输出解析与序列化
+    server.ts          连接生命周期 + 多路复用状态机
+  runtime/
+    context.ts         Worker 内 CGI 上下文注入（env/stdin/stdout/console）
+    pool.ts            实例池、并发、空闲回收、热重载
+    worker-entry.ts    Worker 入口：接收请求、执行脚本、回传输出
+examples/
+  site/public/...      .ts 站点示例
+  php-site/public/...  .php 站点示例（3 行 Caddyfile）
+  caddy/Caddyfile
+  caddy/minimal.Caddyfile
+tests/
+  protocol_test.ts
+  response_test.ts
+  router_test.ts
+```
+
+---
+
+## 10. 里程碑
+
+| 阶段 | 内容                                        | 验收                                          |
+| ---- | ------------------------------------------- | --------------------------------------------- |
+| M1   | 协议编解码 + 单脚本 + unix socket           | `curl` 经 Caddy 拿到脚本输出                  |
+| M2   | 多脚本路由 + `PATH_INFO` + `index.ts`       | `/api/hello.ts`、`/foo.ts/bar` 同时可用       |
+| M3   | 权限降级 + 池化 + 空闲淘汰 + 热重载         | 越权读文件被拒；改脚本免重启生效              |
+| M4   | 流式响应 + 错误处理 + 日志 + `deno compile` | 大响应不 OOM；脚本异常返回 500 且 stderr 有栈 |
+
+---
+
+## 11. 风险与限制
+
+| 风险                                | 影响                                 | 对策                                                      |
+| ----------------------------------- | ------------------------------------ | --------------------------------------------------------- |
+| `--unstable-worker-options`         | 未来版本可能改标志名                 | 启动时探测，缺失则退化为「不降权」并告警                  |
+| `Deno.env` 进程级共享               | 脚本用 `Deno.env.get` 拿不到请求变量 | 已通过替换 `globalThis.Deno` 为 Proxy 解决                |
+| 每请求新建 isolate 有启动开销       | 首字节变慢                           | 实测 ~9ms；V8 code cache 会复用编译产物                   |
+| 无法保留进程内状态（连接池等）      | 每次请求重连 DB                      | 与 PHP 一致；需要共享状态请用 redis / 数据库              |
+| Caddy FastCGI 不支持 chunked 请求体 | 大文件上传受限                       | 文档说明；用 `request_buffers unlimited` 或改走 HTTP 反代 |
+| TS 转译开销                         | 首次请求慢                           | Deno 自带 V8 code cache，后续请求命中                     |
+
+---
+
+## 12. 已确认的决策
+
+| 决策            | 结论                                                                                |
+| --------------- | ----------------------------------------------------------------------------------- |
+| 脚本形态        | **只支持顶层执行式（PHP 式）**，不支持 `export default` handler                     |
+| 执行模型        | 每请求一个全新 Worker，顶层代码每请求重算，不复用模块状态                           |
+| `Deno.env` 兼容 | 一期实现 Proxy 注入                                                                 |
+| 权限配置位置    | 由 Caddy `env FCGI_ALLOW_*` 传入（逗号分隔，避免 JSON 花括号被当 placeholder）      |
+| 脚本扩展名      | `.ts .js .mjs .tsx .jsx`；JSX 需要用户在自己的 `deno.json` 配 `compilerOptions.jsx` |
+
+## 13. JSX 说明
+
+`.tsx/.jsx` 的解析依赖 Deno 的 `compilerOptions.jsx`。宿主默认读取自己的 `deno.json`，
+因此需要用户把 JSX 配置放在启动目录的 `deno.json`，或用 `--config` 指定。
+未配置时脚本编译报错，宿主返回 500 并把编译错误写到 FCGI_STDERR。

@@ -1,0 +1,17 @@
+{
+  "name": "@shynome/deno-fastcgi",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/main.ts"
+  },
+  "tasks": {
+    "dev": "deno run --allow-read --allow-write=/tmp --allow-net --allow-env --unstable-worker-options src/main.ts",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-net --unstable-worker-options tests/"
+  },
+  "compilerOptions": {
+    "strict": true
+  },
+  "fmt": {
+    "lineWidth": 100
+  }
+}
