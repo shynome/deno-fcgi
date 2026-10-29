@@ -7,6 +7,22 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+### Changed
+
+- **只支持 `.php` 脚本**（破坏性变更）：`SCRIPT_EXTENSIONS` 收敛为 `[".php"]`，
+  `INDEX_FILES` 为 `["index.php"]`。`.ts` / `.tsx` / `.js` / `.mjs` / `.jsx`
+  不再被当作可执行脚本（返回 403）。需要 TypeScript 时先 bundle 成 JS，再命名为 `.php` 部署。
+
+  这样「URL → 可执行文件」映射唯一，Caddy 侧基于 URL 的 `path` / `hide` 规则能覆盖每个脚本。
+
+- `examples/site` 下示例全部改名为 `.php`，并合并进 `examples/php-site/public/`；
+  `examples/caddy/Caddyfile` 删除，只保留 `examples/caddy/minimal.Caddyfile`（`php_fastcgi` 三行）。
+
+  原展开配置里的 `@scriptFiles` + `rewrite {file_match.relative}` 一并去掉：它配合
+  `split_path .php` 会把扩展名切掉，导致裸脚本路径（`/api/hello.php`）偶发 404。
+
 ### Removed
 
 - 移除了「文件不存在时按 `SCRIPT_EXTENSIONS` 追加扩展名重试」的行为：`/a/index.php`
@@ -16,8 +32,14 @@
   访问控制只作用于请求路径，挡不住被追加出来的文件；webroot 里任何 `xxx.php.ts`
   也会经由 `/xxx.php` 直接执行。
 
-  目录索引查找（`/dir/` → `dir/index.ts`）不受影响，仍会依次尝试
-  `index.{ts,tsx,mjs,js,jsx,php}`。
+  目录索引查找（`/dir/` → `dir/index.php`）不受影响。
+
+### 迁移指南
+
+1. 把站点里的 `.ts` / `.js` 脚本重命名为 `.php`（内容需是 JavaScript，去掉类型注解）
+2. 删掉 Caddyfile 里的 `@scriptFiles` + `rewrite {file_match.relative}` 段
+3. `split_path` / `split` 全部改为 `.php`，或者直接用 `php_fastcgi`
+4. 常驻脚本删掉 `new Hono().basePath("/api/xxx.php")` 里的 `basePath`（0.1.1 起就不需要）
 
 ## [0.1.1] - 2026-10-29
 

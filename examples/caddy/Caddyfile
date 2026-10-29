@@ -1,0 +1,48 @@
+:8080 {
+	# {$PWD} = 启动 caddy 时的工作目录，需在仓库根目录执行 caddy run
+	root * {$PWD}/examples/site/public
+
+	route {
+		# 目录请求补尾斜杠：/api -> /api/
+		@canonicalPath {
+			file {path}/index.php
+			not path */
+		}
+		redir @canonicalPath {http.request.orig_uri.path}/ 308
+
+		# 文件存在则 rewrite 到该文件；split_path 让 /a/hello.php/extra 命中 /a/hello.php
+		@scriptFiles file {
+			try_files {path} {path}/index.php
+			try_policy first_exist_fallback
+			split_path .php
+		}
+		rewrite @scriptFiles {file_match.relative}
+
+		# 降权示例：只有 /secure/ 下的脚本被限制权限（不能读系统文件 / 不能联网）
+		@secure path /secure/*.php*
+		reverse_proxy @secure unix//tmp/deno-fcgi.sock {
+			transport fastcgi {
+				split .php
+				capture_stderr
+				env FCGI_ALLOW_READ {$PWD}/examples/site/public/secure
+			}
+		}
+
+		# 其余脚本继承服务端权限（可以加载 npm 依赖、访问网络等）
+		@scripts {
+			path *.php*
+			not path /secure/*
+		}
+		reverse_proxy @scripts unix//tmp/deno-fcgi.sock {
+			transport fastcgi {
+				split .php
+				capture_stderr
+			}
+		}
+	}
+
+	file_server {
+		# 绝不能把脚本源码当静态文件下发
+		hide *.php *.ts *.tsx *.js *.jsx
+	}
+}

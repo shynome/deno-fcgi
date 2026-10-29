@@ -1,19 +1,14 @@
 /**
- * 可执行脚本的扩展名，按匹配优先级排列。
+ * 可执行脚本的扩展名。
  *
- * 仅用于校验扩展名是否合法、以及把 `/a/foo.ts/bar` 这类未拆分的路径切开，
- * **不做**「文件不存在时追加扩展名重试」——那样会让 URL 与实际执行的文件脱钩，
- * 使 Caddy 侧基于 URL 的 `hide` / 访问控制失效。
+ * 只认 `.php`：Deno 按扩展名判定模块类型，`.php` 会被当作 **JavaScript** 解析。
+ * 想写 TypeScript 就先 bundle 成 JS，再命名为 `.php` 部署。
+ *
+ * 这样「URL → 可执行文件」的映射唯一且可预期，Caddy 侧基于 URL 的访问控制
+ * 能覆盖到每一个可执行脚本。
  */
-export const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mjs", ".js", ".jsx", ".php"] as const;
-export const INDEX_FILES = [
-  "index.ts",
-  "index.tsx",
-  "index.mjs",
-  "index.js",
-  "index.jsx",
-  "index.php",
-];
+export const SCRIPT_EXTENSIONS = [".php"] as const;
+export const INDEX_FILES = ["index.php"];
 
 export interface ScriptRoute {
   /** 脚本的真实绝对路径（已解析软链接） */

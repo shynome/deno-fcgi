@@ -9,7 +9,7 @@ app.get("/", (c) =>
     index: true,
     scriptName: process.env.SCRIPT_NAME,
     pathInfo: process.env.PATH_INFO || null,
-    entries: ["hello.ts", "echo.ts", "hono.ts", "mod.ts"],
+    entries: ["hello.php", "echo.php", "hono.php", "worker-style.php"],
   }));
 
 await handlecgi(app, process.env);

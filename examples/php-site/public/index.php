@@ -2,7 +2,6 @@
 // hono-cgi-adapter 把 PATH_INFO 当作请求路径，所以这里注册的是 "/"
 import { Hono } from "npm:hono@^4";
 import { handlecgi } from "npm:hono-cgi-adapter";
-
 const app = new Hono();
 
 app.get("/", (c) =>
@@ -20,12 +19,12 @@ app.get("/", (c) =>
   <h1>deno-fcgi</h1>
   <p>脚本由 <code>hono-cgi-adapter</code> 驱动，SCRIPT_NAME = <code>${process.env.SCRIPT_NAME}</code></p>
   <ul>
-    <li><a href="/api/hello.ts?name=deno">/api/hello.ts?name=deno</a></li>
-    <li><a href="/api/hello.ts/users/42">/api/hello.ts/users/42</a>（PATH_INFO 子路由）</li>
-    <li><a href="/api/hono.ts">/api/hono.ts</a>（完整 Hono 示例）</li>
+    <li><a href="/api.php">/api.php</a>（最简 CGI 脚本）</li>
+    <li><a href="/api/hello.php?name=deno">/api/hello.php?name=deno</a></li>
+    <li><a href="/api/hono.php">/api/hono.php</a>（完整 Hono 示例）</li>
+    <li><a href="/api/worker-style.php">/api/worker-style.php</a>（常驻 Worker）</li>
     <li><a href="/api/">/api/</a>（目录索引）</li>
-    <li><a href="/secure/perm.ts">/secure/perm.ts</a>（权限降级）</li>
-    <li><a href="/static.html">/static.html</a>（不进 Deno 的静态文件）</li>
+    <li><a href="/static.html">/static.html</a>（不经 Deno 的静态文件）</li>
   </ul>
 </body>
 </html>`,

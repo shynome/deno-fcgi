@@ -5,12 +5,12 @@ import { handlecgi } from "npm:hono-cgi-adapter";
 
 const app = new Hono();
 
-async function probe(action: () => Promise<unknown>): Promise<string> {
+async function probe(action) {
   try {
     await action();
     return "allowed";
   } catch (error) {
-    return (error as Error).name;
+    return error.name;
   }
 }
 

@@ -4,8 +4,11 @@
 
 和 PHP 一样：**URL 路径直接对应磁盘上的脚本文件**，新增脚本不用改配置、不用重启服务。
 
-```ts
-// public/api/hello.ts
+**只支持 `.php` 后缀**：Deno 会把它按 **JavaScript** 解析。要写 TypeScript 就先 bundle 成 JS，
+再命名为 `.php` 部署。
+
+```js
+// public/api/hello.php
 import { Hono } from "npm:hono@^4";
 
 const app = new Hono();
@@ -17,10 +20,10 @@ export default app;
 ```
 
 ```bash
-curl 'http://localhost:8080/api/hello.ts?name=deno'
+curl 'http://localhost:8080/api/hello.php?name=deno'
 # hello name=deno
 
-curl 'http://localhost:8080/api/hello.ts/users/42'
+curl 'http://localhost:8080/api/hello.php/users/42'
 # {"id":"42"}
 ```
 
@@ -29,12 +32,12 @@ curl 'http://localhost:8080/api/hello.ts/users/42'
 ## 特性
 
 - 标准 FastCGI responder，一条连接上支持多请求复用
-- 多脚本路由：`/a/b.ts`、`/dir/`（→ `dir/index.ts`）、`/a/b.ts/extra`（PATH_INFO）
+- 多脚本路由：`/a/b.php`、`/dir/`（→ `dir/index.php`）、`/a/b.php/extra`（PATH_INFO）
 - 真正的 CGI 语义：每次请求一个全新 Worker isolate，脚本顶层代码重新执行
 - 脚本里直接用 `process.env`、`console.log`、`Deno.stdin` 读写 CGI 数据
 - 两种脚本形态：`export default { fetch }`（常驻复用）与顶层执行式（PHP 风格）
 - 默认零权限，只自动放行 `DOCUMENT_ROOT` 的 `read`；联网 / 写 / 子进程需显式放开
-- 脚本可以 `import "./helper.ts"`、读同一站点里的模板和配置
+- 脚本可以 `import "./helper.php"`、读同一站点里的模板和配置
 - `deno compile` 可打包成单文件二进制
 
 ## 快速开始
@@ -53,46 +56,6 @@ deno run --allow-read --allow-net --allow-env --allow-write \
 ```caddyfile
 example.com {
 	root * /srv/site/public
-
-	route {
-		@canonicalPath {
-			file {path}/index.ts
-			not path */
-		}
-		redir @canonicalPath {http.request.orig_uri.path}/ 308
-
-		@scriptFiles file {
-			try_files {path} {path}/index.ts
-			try_policy first_exist_fallback
-			split_path .ts
-		}
-		rewrite @scriptFiles {file_match.relative}
-
-		@scripts path *.ts*
-		reverse_proxy @scripts unix//run/deno-fcgi.sock {
-			transport fastcgi {
-				split .ts
-				capture_stderr
-			}
-		}
-	}
-
-	file_server {
-		hide *.ts *.tsx *.jsx
-	}
-}
-```
-
-> - `*.ts*` 里的 `*` 不能省，否则带 PATH_INFO 的请求（`/a.ts/foo`）不会进来
-> - `.ts` 不能用 `php_fastcgi` 简写，它对 `/` 的 try_files 会拼出 `//index.ts` 导致 404
-
-### 最小配置：`.php` 后缀
-
-如果想让 Caddyfile 尽量短，把脚本命名为 `.php`：
-
-```caddyfile
-:8081 {
-	root * /srv/site/public
 	php_fastcgi unix//run/deno-fcgi.sock
 	file_server
 }
@@ -101,19 +64,19 @@ example.com {
 `php_fastcgi` 自带 `split .php`、`index.php` 兜底和目录重定向，所以只要三行。 示例见
 `examples/caddy/minimal.Caddyfile` 与 `examples/php-site/`。
 
-代价：
+行为：
 
 | 项目         | 说明                                                                                                                                                         |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 模块类型     | Deno 只把 `.php` 按 **JavaScript** 解析，不能写 TS 类型注解                                                                                                  |
 | PATH_INFO    | 正常：`/api.php/extra` → `PATH_INFO=/extra`                                                                                                                  |
 | 未匹配的路径 | 所有未命中的路径（含 `.php` 和静态文件）都会执行 `index.php` 并返回 200——这是 PHP 前端控制器模式；需要真的 404 就加 `try_files {path} {path}/index.php =404` |
+| 源码保护     | 站点里不要混入 `.ts` / `.js` 源文件，它们会被 `file_server` 当静态文件下载                                                                                  |
 
-`.php` 会被 Deno 按 **JavaScript** 解析——直接把编译后的 JS 放进去就行。
+> 需要按目录降权（`FCGI_ALLOW_*`）时，把 `reverse_proxy` 展开写，见下方「权限控制」。
 
 ## 脚本怎么写
 
-Worker 的 `read` 权限默认是整个 **`DOCUMENT_ROOT`**，所以脚本可以 `import "./helper.ts"`、
+Worker 的 `read` 权限默认是整个 **`DOCUMENT_ROOT`**，所以脚本可以 `import "./helper.php"`、
 读取同一站点里的模板 / 配置文件，但读不到站点之外的任何东西。
 
 支持两种形态，宿主自动识别：
@@ -127,7 +90,7 @@ Worker 的 `read` 权限默认是整个 **`DOCUMENT_ROOT`**，所以脚本可以
 
 与 `Deno.serve` / Cloudflare Workers 的写法一致，Hono 实例本身就有 `fetch`：
 
-```ts
+```js
 import { Hono } from "npm:hono@^4";
 
 const app = new Hono();
@@ -140,7 +103,7 @@ export default app; // 等价于 export default { fetch: app.fetch }
 
 Request URL 的 path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的 `split` 剥掉）， query 取
 `QUERY_STRING`，和顶层执行式 / `hono-cgi-adapter` 看到的一致： 浏览器访问
-`/api/hello.ts/users/42` 时，`c.req.path` 就是 `/users/42`，所以 **不需要 `basePath`**。
+`/api/hello.php/users/42` 时，`c.req.path` 就是 `/users/42`，所以 **不需要 `basePath`**。
 需要原始完整地址（含脚本名）时读 `process.env.REQUEST_URI`。
 
 这种形态下模块只加载一次，Worker 常驻，后续请求只需构造 Request 并调用 `fetch`。
@@ -150,8 +113,8 @@ Request URL 的 path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的 `split` �
 
 脚本就是一个普通的 Deno 脚本，顶层代码即请求逻辑：
 
-```ts
-// public/api/echo.ts
+```js
+// public/api/echo.php
 const body = await new Response(Deno.stdin.readable).text();
 
 console.log("Content-Type: application/json; charset=utf-8");
@@ -174,7 +137,7 @@ console.log(JSON.stringify({
 
 响应格式就是 CGI：先输出头，空行后是 body。
 
-```ts
+```js
 console.log("Status: 404 Not Found");
 console.log("Content-Type: text/html");
 console.log("");
@@ -228,7 +191,7 @@ evict，等它结束后的下一个周期再判。
 `examples/` 下的所有脚本都基于 [hono-cgi-adapter](https://github.com/taisan11/hono-cgi-adapter)，
 可以把现有 Hono 应用直接搬过来：
 
-```ts
+```js
 import { Hono } from "npm:hono@^4";
 import { handlecgi } from "npm:hono-cgi-adapter";
 
@@ -241,23 +204,26 @@ app.post("/echo", async (c) => c.json({ body: await c.req.text() }));
 await handlecgi(app, process.env);
 ```
 
-示例目录：
+示例目录（`examples/php-site/public/`）：
 
-| 文件             | 演示内容                                     |
-| ---------------- | -------------------------------------------- |
-| `index.ts`       | HTML 索引页                                  |
-| `api/hello.ts`   | 查询参数 + PATH_INFO 子路由                  |
-| `api/echo.ts`    | POST 请求体                                  |
-| `api/index.ts`   | 目录索引                                     |
-| `api/hono.ts`    | 中间件 / 路由组 / JSON body / 404 / onError  |
-| `secure/perm.ts` | 权限放开（配合 Caddyfile 的 `FCGI_ALLOW_*`） |
+| 文件                    | 演示内容                                    |
+| ----------------------- | ------------------------------------------- |
+| `index.php`             | HTML 索引页                                 |
+| `api.php`               | 最简 CGI 脚本                               |
+| `api/hello.php`         | 查询参数 + Hono 路由                        |
+| `api/echo.php`          | POST 请求体                                 |
+| `api/index.php`         | 目录索引                                    |
+| `api/hono.php`          | 中间件 / 路由组 / JSON body / 404 / onError |
+| `api/worker-style.php`  | `export default { fetch }` 常驻模式         |
+| `secure/perm.php`       | 权限降级（需在 Caddy 里配 `FCGI_ALLOW_*`）  |
+| `static.html`           | 不经 Deno 的静态文件                        |
 
 该适配器只用 `PATH_INFO` 当请求路径，所以：
 
 | 浏览器访问              | Hono 看到的路径 |
 | ----------------------- | --------------- |
-| `/api/hono.ts`          | `/`             |
-| `/api/hono.ts/users/42` | `/users/42`     |
+| `/api/hono.php`         | `/`             |
+| `/api/hono.php/users/42` | `/users/42`     |
 
 两个需要留意的地方：
 
@@ -270,7 +236,7 @@ iterator、`process.env`。
 
 > 模块下载与缓存读取由 Deno 加载器负责，**不受脚本权限约束**，所以 npm/jsr 依赖
 > 在降权目录里也能正常加载。`FCGI_ALLOW_NET` 只影响脚本运行时的 `fetch`， `FCGI_ALLOW_READ` 只影响
-> `import "./local.ts"` 这类本地模块。
+> `import "./local.php"` 这类本地模块。
 
 ## 权限控制
 
@@ -292,7 +258,7 @@ Worker 只能拿主进程权限的子集，尝试提权会报 `Can't escalate pa
 @api path /api/*
 reverse_proxy @api unix//run/deno-fcgi.sock {
 	transport fastcgi {
-		split .ts
+		split .php
 		env FCGI_ALLOW_READ /srv/site/public
 		env FCGI_ALLOW_NET api.github.com,127.0.0.1:5432
 	}
@@ -342,8 +308,20 @@ env FCGI_ALLOW_READ /srv/site/data
 env FCGI_ALLOW_WRITE /srv/site/uploads
 ```
 
-`examples/caddy/Caddyfile` 里的 `/secure/` 就是第一个配方：只能读 `public/secure`， 读
-`/etc/hostname` 和联网都返回 `NotCapable`。
+`examples/php-site/public/secure/` 就是第一个配方的目标目录：只能读 `public/secure`， 读
+`/etc/hostname` 和联网都返回 `NotCapable`。启用它需要在 Caddyfile 里把路由拆开：
+
+```caddyfile
+@secure path /secure/*
+reverse_proxy @secure unix//run/deno-fcgi.sock {
+	transport fastcgi {
+		split .php
+		env FCGI_ALLOW_READ /srv/site/public/secure
+	}
+}
+
+php_fastcgi unix//run/deno-fcgi.sock
+```
 
 ## CLI
 
@@ -367,16 +345,17 @@ env FCGI_ALLOW_WRITE /srv/site/uploads
   选择常驻形态意味着接受同一 Worker 内请求串行、模块状态共享
 - 同一 Worker 内的请求是串行的，并发靠多个 Worker（`--resident-concurrency`）； Worker 内存比
   isolate 贵，不建议把这个值开得很大
-- `.tsx/.jsx` 需要在启动目录的 `deno.json` 配置 `compilerOptions.jsx`
+- **只支持 `.php` 脚本**，内容是 JavaScript：`.ts` / `.tsx` / `.js` / `.mjs` 都不能直接执行，
+  需要 TypeScript 就先 bundle 成 JS 再命名为 `.php`
 
 ## 开发
 
 ```bash
 deno task test
-deno task dev --listen unix:/tmp/deno-fcgi.sock
+deno task dev --listen unix:/tmp/deno-fcgi-php.sock
 
-# 另开一个终端
-caddy run --config examples/caddy/Caddyfile --adapter caddyfile
+# 另开一个终端，在仓库根目录执行（{$PWD} 会指向当前目录）
+caddy run --config examples/caddy/minimal.Caddyfile --adapter caddyfile
 ```
 
 设计细节见 [design.md](./design.md)。

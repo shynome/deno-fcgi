@@ -1,4 +1,4 @@
-// POST /api/echo.ts —— 回显请求体
+// POST /api/echo.php —— 回显请求体
 import { Hono } from "npm:hono@^4";
 import { handlecgi } from "npm:hono-cgi-adapter";
 

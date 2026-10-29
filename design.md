@@ -10,7 +10,7 @@
 ### 目标
 
 - 实现标准 FastCGI responder，Caddy 通过 `transport fastcgi` 接入
-- 多脚本：`/api/hello.ts`、`/admin/index.ts` 各自独立运行，无需重启服务
+- 多脚本：`/api/hello.php`、`/admin/index.php` 各自独立运行，无需重启服务
 - CGI 风格脚本：脚本内直接读 `process.env` / `Deno.stdin`，用 `console.log` 输出响应
 - 脚本级权限隔离：每个脚本只能访问配置允许的路径 / 域名
 - 单进程常驻，脚本跑在 Worker 里；`deno compile` 出单文件二进制
@@ -122,8 +122,8 @@ FCGI_MAX_LENGTH = 65535
 以 Caddy 通过 PARAMS 传来的变量为准：
 
 ```
-SCRIPT_FILENAME   /srv/site/api/hello.ts     ← 主依据
-SCRIPT_NAME       /api/hello.ts
+SCRIPT_FILENAME   /srv/site/api/hello.php    ← 主依据
+SCRIPT_NAME       /api/hello.php
 PATH_INFO         /bar/baz                   ← 可能为空
 DOCUMENT_ROOT     /srv/site
 ```
@@ -134,10 +134,10 @@ DOCUMENT_ROOT     /srv/site
 2. `realPath(SCRIPT_FILENAME)`，解析软链接后校验它位于 `realPath(DOCUMENT_ROOT)` 之内 （防 `..`
    与符号链接逃逸）
 3. 判定：
-   - 是文件且扩展名 ∈ `[.ts, .js, .mjs, .tsx, .jsx, .php]` → 执行 （`.tsx/.jsx` 需要 JSX
-     编译配置，见 §11；`.php` 只能写纯 JS，因为 Deno 对未知扩展名按 JS 解析）
-   - 是目录 → 尝试 `<dir>/index.ts`
-   - 都不满足 → 404（可选：回退 `DOCUMENT_ROOT/index.ts`，由 Caddy `try_files` 控制）
+   - 是文件且扩展名就是 `.php` → 执行（内容是 **JavaScript**，Deno 对未知扩展名按 JS 解析）
+   - 是目录 → 尝试 `<dir>/index.php`
+   - 其它扩展名一律 403，不存在的路径直接 404
+   - 都不满足 → 404（可选：回退 `DOCUMENT_ROOT/index.php`，由 Caddy `try_files` 控制）
 4. `PATH_INFO` 原样放进环境变量，交给脚本自行路由（Hono 可吃）
 
 ### 路由缓存
@@ -167,8 +167,8 @@ TTL 取 2 秒是为了和常驻脚本的热更新周期一致：新增脚本立�
 
 脚本就是一个普通 Deno 脚本，不 import 任何宿主 SDK 也能跑：
 
-```ts
-// public/api/hello.ts
+```js
+// public/api/hello.php
 const method = process.env.REQUEST_METHOD;
 const name = new URL("http://x" + process.env.REQUEST_URI).searchParams.get("name");
 
@@ -213,10 +213,10 @@ await handlecgi(app, process.env);
 
 注意该适配器只把 `PATH_INFO` 当作请求路径，且不会拼接 `QUERY_STRING`：
 
-| 浏览器访问             | Hono 看到的路径 |
-| ---------------------- | --------------- |
-| `/api/hono.ts`         | `/`             |
-| `/api/hono.ts/users/1` | `/users/1`      |
+| 浏览器访问              | Hono 看到的路径 |
+| ----------------------- | --------------- |
+| `/api/hono.php`         | `/`             |
+| `/api/hono.php/users/1` | `/users/1`      |
 
 `examples/` 下所有示例均采用这种写法。
 
@@ -258,13 +258,13 @@ npm/jsr 模块的下载与缓存读取是 Deno 加载器行为，不受脚本权
 
 `Request` 的 URL 与 CGI 语义保持一致：path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的
 `split` 剥掉），query 取 `QUERY_STRING`。所以两种形态下框架看到的路径相同——
-`/api/hello.ts/users/42` 都是 `/users/42`——路由不需要写 `basePath`。 需要原始完整地址（含脚本名）时读
+`/api/hello.php/users/42` 都是 `/users/42`——路由不需要写 `basePath`。 需要原始完整地址（含脚本名）时读
 `process.env.REQUEST_URI`，它照旧注入。
 
 两种形态下 `import.meta.url` 都是正常的 `file://` URL。
 
-```ts
-// public/api/hello.ts —— 顶层就是逻辑
+```js
+// public/api/hello.php —— 顶层就是逻辑
 const method = process.env.REQUEST_METHOD;
 const name = new URL("http://x" + process.env.REQUEST_URI).searchParams.get("name");
 
@@ -365,7 +365,7 @@ interface PoolOptions {
 ```
 
 `read` 默认是整个 `DOCUMENT_ROOT`（边界就是上面路由用的那个值），所以脚本能加载自己、
-`import "./x.ts"`、读同站点的模板/配置，但读不到站点之外的东西。
+`import "./x.php"`、读同站点的模板/配置，但读不到站点之外的东西。
 
 早期实现只放行单个脚本文件，导致本地 import 不可用。现在的合并规则：
 
@@ -382,7 +382,7 @@ Caddy 侧在 `transport fastcgi` 块里用 `env` 声明（每条路由可不同�
 @api path /api/*
 reverse_proxy @api unix//run/deno-fcgi.sock {
     transport fastcgi {
-        split .ts
+        split .php
         env FCGI_ALLOW_READ /srv/site/public
         env FCGI_ALLOW_NET api.github.com,127.0.0.1:5432
     }
@@ -418,63 +418,17 @@ reverse_proxy @api unix//run/deno-fcgi.sock {
 
 ## 8. Caddy 配置
 
-脚本必须放在 Caddy 的 webroot 下——Caddy 要依靠文件是否存在来决定是否转发。 用
-`file_server { hide *.ts }` 防止源码被当静态文件下载。
+脚本必须放在 Caddy 的 webroot 下。
 
 ```
 /srv/site/public/
-  index.ts            ← 目录索引
-  api/hello.ts
+  index.php           ← 目录索引
+  api/hello.php
   static.html
 ```
 
 ```caddyfile
 example.com {
-    root * /srv/site/public
-
-    route {
-        # 目录请求补尾斜杠：/api -> /api/
-        @canonicalPath {
-            file {path}/index.ts
-            not path */
-        }
-        redir @canonicalPath {http.request.orig_uri.path}/ 308
-
-        # 文件存在则 rewrite；split_path 让 /a/hello.ts/extra 命中 /a/hello.ts
-        @scriptFiles file {
-            try_files {path} {path}/index.ts
-            try_policy first_exist_fallback
-            split_path .ts
-        }
-        rewrite @scriptFiles {file_match.relative}
-
-        @scripts path *.ts*
-        reverse_proxy @scripts unix//run/deno-fcgi.sock {
-            transport fastcgi {
-                split .ts
-                capture_stderr
-                env FCGI_ALLOW_READ /srv/site/public
-            }
-        }
-    }
-
-    file_server {
-        hide *.ts *.tsx *.jsx
-    }
-}
-```
-
-- `split .ts`：`/api/hello.ts/extra` → `SCRIPT_NAME=/api/hello.ts`，`PATH_INFO=/extra`
-- `*` 而不是 `*.ts`：带 PATH_INFO 的请求尾巴不是 `.ts` 结尾
-- **不要用 `php_fastcgi` 简写**：它会用 `@indexFiles` 自己的 try_files，对 `/` 的 `{path}/index.ts`
-  拼成 `//index.ts` 导致根路径 404；展开形式才能正常处理
-- `env` 要写在 `transport fastcgi` 块内，值里不要出现 `{...}`（会被当 placeholder）
-- `capture_stderr` 同样属于 `transport fastcgi` 块
-
-### 最小配置：`.php` 后缀（3 行）
-
-```caddyfile
-:8081 {
     root * /srv/site/public
     php_fastcgi unix//run/deno-fcgi.sock
     file_server
@@ -482,7 +436,7 @@ example.com {
 ```
 
 `php_fastcgi` 的默认约定正好契合我们的多脚本模型：`split .php`、`index.php` 兜底、
-目录补尾斜杠。实测行为（与展开形式一致）：
+目录补尾斜杠。实测行为：
 
 | 请求             | 结果                                                |
 | ---------------- | --------------------------------------------------- |
@@ -494,14 +448,46 @@ example.com {
 
 需要真正的 404 就给 `try_files` 加 `=404`（配置多一行）。
 
-唯一与 `.php` 绑定的限制是**模块类型**：Deno 按扩展名判定模块类型，`.php` 被当作 JavaScript，不能写
-TS 类型注解。直接放编译后的 JS 即可。
+两点限制：
 
-另一个连带影响：`read` 默认放行整个 `DOCUMENT_ROOT`，所以 `.php` 脚本同样可以 `import "./helper.js"`
-（注意扩展名要写 `.js` 或 `.php`，Deno 按扩展名判定模块类型）。 `import.meta.url` 是正常的 `file://`
-URL，可用于定位自身。
+- 转发匹配器是 `path *.php`，没有任何静态防泄露措施。站点里不能混入 `.ts` / `.js`
+  源文件，否则会被 `file_server` 当静态文件下发。
+- `read` 默认放行整个 `DOCUMENT_ROOT`，脚本可以 `import "./helper.php"`，
+  `import.meta.url` 是正常的 `file://` URL，可用于定位自身。
 
+### 需要按目录降权时
+
+`php_fastcgi` 不能按路径传 `FCGI_ALLOW_*`，这时把路由展开写：
+
+```caddyfile
+@secure path /secure/*.php*
+reverse_proxy @secure unix//run/deno-fcgi.sock {
+    transport fastcgi {
+        split .php
+        capture_stderr
+        env FCGI_ALLOW_READ /srv/site/public/secure
+    }
+}
+
+@scripts {
+    path *.php*
+    not path /secure/*
+}
+reverse_proxy @scripts unix//run/deno-fcgi.sock {
+    transport fastcgi {
+        split .php
+        capture_stderr
+    }
+}
+```
+
+- `*.php*` 里的 `*` 不能省，否则带 PATH_INFO 的请求（`/a.php/foo`）不会进来
+- `env` 要写在 `transport fastcgi` 块内，值里不要出现 `{...}`（会被当 placeholder）
 - `capture_stderr` 同样属于 `transport fastcgi` 块
+- **不要再加 `@scriptFiles` + `rewrite {file_match.relative}`**：配合 `split_path .php` 时它会把
+  `.php` 切掉，导致裸脚本路径（如 `/api/hello.php`）rewrite 成 `/api/hello` 后不再匹配
+  `*.php*`，落到 `file_server` 返回 404（且时好时坏）。`split .php` 已经在 transport 层
+  负责拆分 `SCRIPT_FILENAME` / `PATH_INFO`，不需要 rewrite。
 
 ---
 
@@ -523,9 +509,7 @@ src/
     pool.ts            实例池、并发、空闲回收、热重载
     worker-entry.ts    Worker 入口：接收请求、执行脚本、回传输出
 examples/
-  site/public/...      .ts 站点示例
-  php-site/public/...  .php 站点示例（3 行 Caddyfile）
-  caddy/Caddyfile
+  php-site/public/...  .php 站点示例（内容是 JS）
   caddy/minimal.Caddyfile
 tests/
   protocol_test.ts
@@ -540,7 +524,7 @@ tests/
 | 阶段 | 内容                                        | 验收                                          |
 | ---- | ------------------------------------------- | --------------------------------------------- |
 | M1   | 协议编解码 + 单脚本 + unix socket           | `curl` 经 Caddy 拿到脚本输出                  |
-| M2   | 多脚本路由 + `PATH_INFO` + `index.ts`       | `/api/hello.ts`、`/foo.ts/bar` 同时可用       |
+| M2   | 多脚本路由 + `PATH_INFO` + `index.php`      | `/api/hello.php`、`/foo.php/bar` 同时可用   |
 | M3   | 权限降级 + 池化 + 空闲淘汰 + 热重载         | 越权读文件被拒；改脚本免重启生效              |
 | M4   | 流式响应 + 错误处理 + 日志 + `deno compile` | 大响应不 OOM；脚本异常返回 500 且 stderr 有栈 |
 
@@ -557,7 +541,7 @@ tests/
 | 常驻形态共享模块状态                | 并发写同一份状态需要自己加锁         | 同一 Worker 内请求串行执行；不改 Worker 之间的共享         |
 | resident 大响应全量缓冲             | 超大文件占内存                       | 目前读成 arrayBuffer 再回传（transfer 免拷贝，但未免内存） |
 | Caddy FastCGI 不支持 chunked 请求体 | 大文件上传受限                       | 文档说明；用 `request_buffers unlimited` 或改走 HTTP 反代  |
-| TS 转译开销                         | 首次请求慢                           | Deno 自带 V8 code cache，后续请求命中                      |
+| 只能跑 `.php`（内容是 JS）          | 不能直接写 TS                        | 先 bundle 成 JS 再命名为 `.php` 部署                       |
 
 ---
 
@@ -569,12 +553,23 @@ tests/
 | 执行模型        | 常驻 1–2 ms；顶层执行式每请求重建 Worker（~30 ms），模块状态不跨请求           |
 | `Deno.env` 兼容 | Proxy 注入，每请求指向当前请求的 env                                           |
 | 权限边界        | `DOCUMENT_ROOT` 同时当路径与边界，不需要额外目录配置                           |
-| 读权限默认值    | 整个 `DOCUMENT_ROOT`，本地 `import "./x.ts"` 可用                              |
+| 读权限默认值    | 整个 `DOCUMENT_ROOT`，本地 `import "./x.php"` 可用                             |
 | 权限配置位置    | 由 Caddy `env FCGI_ALLOW_*` 传入（逗号分隔，避免 JSON 花括号被当 placeholder） |
-| 脚本扩展名      | `.ts .js .mjs .tsx .jsx .php`；JSX 需要用户在自己的 `deno.json` 配 JSX 选项    |
+| 脚本扩展名      | **只认 `.php`**，内容是 JavaScript；需要 TS 就先 bundle 再命名 `.php`           |
 
-## 13. JSX 说明
+## 13. 为什么只支持 `.php`
 
-`.tsx/.jsx` 的解析依赖 Deno 的 `compilerOptions.jsx`。宿主默认读取自己的 `deno.json`，
-因此需要用户把 JSX 配置放在启动目录的 `deno.json`，或用 `--config` 指定。
-未配置时脚本编译报错，宿主返回 500 并把编译错误写到 FCGI_STDERR。
+Deno 按扩展名判定模块类型，`.php` 会被当作 **JavaScript** 解析。固定单一扩展名的好处：
+
+- 「URL → 可执行文件」映射唯一，Caddy 侧基于 URL 的 `path` / `hide` 规则能覆盖每一个可执行脚本
+- 不会出现「同一个逻辑换个后缀就能绕过访问控制」的路径
+- 与 `php_fastcgi` 这类内置简写天然兼容
+
+代价是**不能直接写 TypeScript**。需要 TS 的话先 bundle 成 JS，再命名为 `xxx.php` 部署：
+
+```bash
+deno bundle src/api/hello.ts public/api/hello.php   # 具体命令按 bundler 而定
+```
+
+早期版本支持 `.ts` / `.tsx` / `.js` / `.mjs` / `.jsx`，但在“文件不存在时追加扩展名重试”
+的配合下，URL 与实际执行文件会脱钩，因此一并移除。

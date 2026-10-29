@@ -1,5 +1,5 @@
-// /api/hello.ts?name=deno
-// /api/hello.ts/users/42  -> PATH_INFO 为 /users/42
+// /api/hello.php?name=deno
+// /api/hello.php/users/42  -> PATH_INFO 为 /users/42
 import { Hono } from "npm:hono@^4";
 import { handlecgi } from "npm:hono-cgi-adapter";
 
