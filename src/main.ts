@@ -11,7 +11,7 @@ import { FcgiServer, type Logger } from "./fcgi/server.ts";
 import { Router } from "./router.ts";
 import { WorkerPool } from "./runtime/pool.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 interface CliOptions {
   listen: string;
