@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+### Removed
+
+- 移除了「文件不存在时按 `SCRIPT_EXTENSIONS` 追加扩展名重试」的行为：`/a/index.php`
+  不会再退到 `index.php.ts`，`/foo` 也不会退到 `/foo.ts`，文件不存在就是 404。
+
+  原因是补后缀会让 **URL 与实际执行的文件脱钩**：Caddy 侧基于 URL 的 `hide`、`path`
+  访问控制只作用于请求路径，挡不住被追加出来的文件；webroot 里任何 `xxx.php.ts`
+  也会经由 `/xxx.php` 直接执行。
+
+  目录索引查找（`/dir/` → `dir/index.ts`）不受影响，仍会依次尝试
+  `index.{ts,tsx,mjs,js,jsx,php}`。
+
 ## [0.1.1] - 2026-10-29
 
 ### Changed

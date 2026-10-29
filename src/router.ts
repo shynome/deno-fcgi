@@ -1,4 +1,10 @@
-/** 可执行脚本的扩展名，按匹配优先级排列 */
+/**
+ * 可执行脚本的扩展名，按匹配优先级排列。
+ *
+ * 仅用于校验扩展名是否合法、以及把 `/a/foo.ts/bar` 这类未拆分的路径切开，
+ * **不做**「文件不存在时追加扩展名重试」——那样会让 URL 与实际执行的文件脱钩，
+ * 使 Caddy 侧基于 URL 的 `hide` / 访问控制失效。
+ */
 export const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mjs", ".js", ".jsx", ".php"] as const;
 export const INDEX_FILES = [
   "index.ts",
@@ -166,12 +172,6 @@ export class Router {
         if (indexStat?.isFile) return candidate;
       }
       throw new RouteError(404, `no index file in ${targetPath}`);
-    }
-    // 文件不存在：再试 <path>.ts 这类省略扩展名的写法
-    for (const ext of SCRIPT_EXTENSIONS) {
-      const candidate = `${targetPath}${ext}`;
-      const candidateStat = await statOrNull(candidate);
-      if (candidateStat?.isFile) return candidate;
     }
     throw new RouteError(404, `script not found: ${targetPath}`);
   }

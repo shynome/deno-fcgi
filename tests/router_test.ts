@@ -106,3 +106,50 @@ Deno.test("Router 拒绝非脚本扩展名", async () => {
 
   await Deno.remove(root, { recursive: true });
 });
+
+Deno.test("Router 不为不存在的路径追加扩展名", async () => {
+  const root = await Deno.makeTempDir();
+  await Deno.mkdir(`${root}/api`, { recursive: true });
+  await Deno.writeTextFile(`${root}/index.ts`, "");
+  await Deno.writeTextFile(`${root}/api.php.ts`, "");
+  await Deno.writeTextFile(`${root}/api/hello.php.ts`, "");
+  await Deno.writeTextFile(`${root}/api/hello.ts`, "");
+  const router = new Router();
+
+  // 同名 TS 存在，也不能让不存在的 api.php 变成可执行
+  let status = 0;
+  try {
+    await router.resolve({
+      SCRIPT_FILENAME: `${root}/api.php`,
+      SCRIPT_NAME: "/api.php",
+      DOCUMENT_ROOT: root,
+    });
+  } catch (error) {
+    status = error instanceof RouteError ? error.status : -1;
+  }
+  assertEquals(status, 404);
+
+  // 带 PATH_INFO 的同样不追加
+  status = 0;
+  try {
+    await router.resolve({
+      SCRIPT_FILENAME: `${root}/api/hello.php`,
+      SCRIPT_NAME: "/api/hello.php",
+      PATH_INFO: "/users/42",
+      DOCUMENT_ROOT: root,
+    });
+  } catch (error) {
+    status = error instanceof RouteError ? error.status : -1;
+  }
+  assertEquals(status, 404);
+
+  // 目录索引查找不受影响
+  const index = await router.resolve({
+    SCRIPT_FILENAME: `${root}/`,
+    SCRIPT_NAME: "/",
+    DOCUMENT_ROOT: root,
+  });
+  assertEquals(index.scriptPath.endsWith("/index.ts"), true);
+
+  await Deno.remove(root, { recursive: true });
+});
