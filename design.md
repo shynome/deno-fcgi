@@ -256,6 +256,11 @@ npm/jsr 模块的下载与缓存读取是 Deno 加载器行为，不受脚本权
 顶层执行式必须是新 isolate（模块只能求值一次）；`fetch` 形态则只需加载一次， 每请求构造标准
 `Request` 调用 `fetch`，输出由 wrapper 转成 CGI 字节流。
 
+`Request` 的 URL 与 CGI 语义保持一致：path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的
+`split` 剥掉），query 取 `QUERY_STRING`。所以两种形态下框架看到的路径相同——
+`/api/hello.ts/users/42` 都是 `/users/42`——路由不需要写 `basePath`。 需要原始完整地址（含脚本名）时读
+`process.env.REQUEST_URI`，它照旧注入。
+
 两种形态下 `import.meta.url` 都是正常的 `file://` URL。
 
 ```ts

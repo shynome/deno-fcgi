@@ -101,7 +101,15 @@ scope.onmessage = async (event) => {
   }
 };
 
-/** 把 CGI 环境变量还原成标准 Request */
+/**
+ * 把 CGI 环境变量还原成标准 Request。
+ *
+ * URL 的 path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的 `split` 剥掉），
+ * query 取 `QUERY_STRING`，与 `hono-cgi-adapter` 这类适配器的行为一致：
+ * 框架看到的就是应用内路径，不需要自己写 basePath。
+ *
+ * 需要原始完整地址（含脚本名）时读 `process.env.REQUEST_URI`，它仍然注入。
+ */
 function buildRequest(
   env: Record<string, string>,
   body: Uint8Array,
@@ -116,14 +124,37 @@ function buildRequest(
 
   const method = env["REQUEST_METHOD"] ?? "GET";
   const host = env["HTTP_HOST"] ?? env["SERVER_NAME"] ?? "localhost";
-  const uri = env["REQUEST_URI"] ?? env["SCRIPT_NAME"] ?? "/";
-  const url = new URL(uri, `http://${host}`);
+  const url = new URL(pathInfoOf(env), `http://${host}`);
+  if (env["QUERY_STRING"]) url.search = env["QUERY_STRING"];
 
   const init: RequestInit = { method, headers };
   if (method !== "GET" && method !== "HEAD" && body.length > 0) {
     init.body = body;
   }
   return new Request(url.href, init);
+}
+
+/**
+ * 算出框架看到的应用内路径。
+ *
+ * 正常情况下 `PATH_INFO` 为空表示请求正好命中脚本本身，此时是 "/"。
+ * 但有些客户端不会拆分 `PATH_INFO`（`/a/foo.ts/bar` 只传完整 URI），
+ * 那时用 `REQUEST_URI` 减掉 `SCRIPT_NAME` 兜底，避免整站路由塌到 "/"。
+ */
+function pathInfoOf(env: Record<string, string>): string {
+  const pathInfo = env["PATH_INFO"];
+  if (pathInfo) {
+    return pathInfo.startsWith("/") ? pathInfo : `/${pathInfo}`;
+  }
+
+  const uriPath = (env["REQUEST_URI"] ?? "").split("?")[0];
+  const scriptName = env["SCRIPT_NAME"] ?? "";
+  if (scriptName && uriPath.startsWith(scriptName)) {
+    const rest = uriPath.slice(scriptName.length);
+    if (rest === "") return "/";
+    if (rest.startsWith("/")) return rest;
+  }
+  return "/";
 }
 
 async function toScriptResponse(response: Response): Promise<ScriptResponse> {

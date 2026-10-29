@@ -8,7 +8,7 @@
 // public/api/hello.ts
 import { Hono } from "npm:hono@^4";
 
-const app = new Hono().basePath("/api/hello.ts");
+const app = new Hono();
 
 app.get("/", (c) => c.text("hello " + (c.req.query("name") ?? "world")));
 app.get("/users/:id", (c) => c.json({ id: c.req.param("id") }));
@@ -130,7 +130,7 @@ Worker 的 `read` 权限默认是整个 **`DOCUMENT_ROOT`**，所以脚本可以
 ```ts
 import { Hono } from "npm:hono@^4";
 
-const app = new Hono().basePath("/api/hello.ts");
+const app = new Hono();
 
 app.get("/", (c) => c.text("hello"));
 app.get("/users/:id", (c) => c.json({ id: c.req.param("id") }));
@@ -138,7 +138,10 @@ app.get("/users/:id", (c) => c.json({ id: c.req.param("id") }));
 export default app; // 等价于 export default { fetch: app.fetch }
 ```
 
-Request 的 URL 是完整的 `REQUEST_URI`（含脚本名），所以用 `basePath` 把脚本路径剥掉。
+Request URL 的 path 取 `PATH_INFO`（`SCRIPT_NAME` 已被 Caddy 的 `split` 剥掉）， query 取
+`QUERY_STRING`，和顶层执行式 / `hono-cgi-adapter` 看到的一致： 浏览器访问
+`/api/hello.ts/users/42` 时，`c.req.path` 就是 `/users/42`，所以 **不需要 `basePath`**。
+需要原始完整地址（含脚本名）时读 `process.env.REQUEST_URI`。
 
 这种形态下模块只加载一次，Worker 常驻，后续请求只需构造 Request 并调用 `fetch`。
 代价是进程内状态（连接池、缓存）会在请求间共享，需要自己考虑并发安全。
