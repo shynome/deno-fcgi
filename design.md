@@ -1,4 +1,4 @@
-# deno-fastcgi 设计文档
+# deno-fcgi 设计文档
 
 面向 Deno 脚本的 FastCGI 服务端，放在 Caddy 后面，行为尽量贴近 PHP-FPM： **URL
 路径直接映射到磁盘上的脚本文件**，无需把每个脚本单独注册成服务。
@@ -28,7 +28,7 @@
 
 ```
                     ┌──────────────────────────────────────────┐
-Browser ──HTTP──> Caddy ──FastCGI(unix socket)──> deno-fastcgi │
+Browser ──HTTP──> Caddy ──FastCGI(unix socket)──> deno-fcgi │
                     └──────────────────────────────────────────┘
                                    │
                   ┌────────────────┴────────────────┐
@@ -375,7 +375,7 @@ Caddy 侧在 `transport fastcgi` 块里用 `env` 声明（每条路由可不同�
 
 ```caddyfile
 @api path /api/*
-reverse_proxy @api unix//run/deno-fastcgi.sock {
+reverse_proxy @api unix//run/deno-fcgi.sock {
     transport fastcgi {
         split .ts
         env FCGI_ALLOW_READ /srv/site/public
@@ -444,7 +444,7 @@ example.com {
         rewrite @scriptFiles {file_match.relative}
 
         @scripts path *.ts*
-        reverse_proxy @scripts unix//run/deno-fastcgi.sock {
+        reverse_proxy @scripts unix//run/deno-fcgi.sock {
             transport fastcgi {
                 split .ts
                 capture_stderr
@@ -471,7 +471,7 @@ example.com {
 ```caddyfile
 :8081 {
     root * /srv/site/public
-    php_fastcgi unix//run/deno-fastcgi.sock
+    php_fastcgi unix//run/deno-fcgi.sock
     file_server
 }
 ```

@@ -76,5 +76,5 @@ Deno.test("错误响应可被重新解析", () => {
   const parsed = parseCgiOutput(errorResponse(500, "boom"));
   if (!parsed) throw new Error("should parse");
   assertEquals(parsed.status, 500);
-  assertEquals(decoder.decode(parsed.body).startsWith("deno-fastcgi: boom"), true);
+  assertEquals(decoder.decode(parsed.body).startsWith("deno-fcgi: boom"), true);
 });

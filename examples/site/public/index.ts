@@ -9,7 +9,7 @@ app.get("/", (c) =>
   c.html(
     `<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>deno-fastcgi</title>
+<head><meta charset="utf-8"><title>deno-fcgi</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:680px;margin:60px auto;padding:0 20px;color:#1f2328}
   code{background:#f6f8fa;padding:2px 6px;border-radius:4px}
@@ -17,7 +17,7 @@ app.get("/", (c) =>
 </style>
 </head>
 <body>
-  <h1>deno-fastcgi</h1>
+  <h1>deno-fcgi</h1>
   <p>脚本由 <code>hono-cgi-adapter</code> 驱动，SCRIPT_NAME = <code>${process.env.SCRIPT_NAME}</code></p>
   <ul>
     <li><a href="/api/hello.ts?name=deno">/api/hello.ts?name=deno</a></li>

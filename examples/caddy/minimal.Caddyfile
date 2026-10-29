@@ -1,6 +1,7 @@
 # 最小配置：3 行
+# {$PWD} = 启动 caddy 时的工作目录，需在仓库根目录执行 caddy run
 :8081 {
-	root * /home/shynome/work/github.com/shynome/deno-fastcgi/examples/php-site/public
-	php_fastcgi unix//tmp/deno-fastcgi-php.sock
+	root * {$PWD}/examples/php-site/public
+	php_fastcgi unix//tmp/deno-fcgi-php.sock
 	file_server
 }

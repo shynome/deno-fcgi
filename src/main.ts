@@ -1,9 +1,9 @@
 /**
- * deno-fastcgi CLI 入口。
+ * deno-fcgi CLI 入口。
  *
  * 用法：
  *   deno run --allow-read --allow-net --allow-env --unstable-worker-options \
- *     jsr:@shynome/deno-fastcgi --listen unix:/run/deno-fastcgi.sock
+ *     jsr:@shynome/deno-fcgi --listen unix:/run/deno-fcgi.sock
  *
  * 可执行范围由 Caddy 传来的 DOCUMENT_ROOT 决定，不需要额外配置。
  */
@@ -49,7 +49,7 @@ export class ConsoleLogger implements Logger {
 
 export function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
-    listen: "unix:/tmp/deno-fastcgi.sock",
+    listen: "unix:/tmp/deno-fcgi.sock",
     maxWorkers: 16,
     prewarm: 1,
     timeoutMs: 30_000,
@@ -111,12 +111,12 @@ export function parseArgs(argv: string[]): CliOptions {
 }
 
 function printHelp(): void {
-  console.log(`deno-fastcgi ${VERSION}
+  console.log(`deno-fcgi ${VERSION}
 
-用法: deno-fastcgi [选项]
+用法: deno-fcgi [选项]
 
 选项:
-  -l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fastcgi.sock）
+  -l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fcgi.sock）
       --max-workers <n>   同时运行的 Worker 上限（默认 16）
       --prewarm <n>       每个脚本保留的空壳数（默认 1）
       --timeout <ms>      单请求超时（默认 30000）
@@ -181,7 +181,7 @@ async function main(): Promise<void> {
 
   const logger = new ConsoleLogger(options.logLevel);
 
-  logger.info("starting deno-fastcgi", {
+  logger.info("starting deno-fcgi", {
     version: VERSION,
     listen: options.listen,
   });

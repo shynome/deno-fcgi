@@ -1,5 +1,5 @@
 {
-  "name": "@shynome/deno-fastcgi",
+  "name": "@shynome/deno-fcgi",
   "version": "0.1.0",
   "exports": {
     ".": "./src/main.ts"

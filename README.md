@@ -1,4 +1,4 @@
-# deno-fastcgi
+# deno-fcgi
 
 给 Deno 脚本用的 FastCGI 服务端，放在 Caddy 后面用。
 
@@ -44,8 +44,8 @@ curl 'http://localhost:8080/api/hello.ts/users/42'
 # 不需要 --root：默认以 Caddy 传来的 DOCUMENT_ROOT 为边界
 deno run --allow-read --allow-net --allow-env --allow-write \
   --unstable-worker-options \
-  jsr:@shynome/deno-fastcgi \
-  --listen unix:/run/deno-fastcgi.sock
+  jsr:@shynome/deno-fcgi \
+  --listen unix:/run/deno-fcgi.sock
 
 # 2. Caddy 侧
 ```
@@ -69,7 +69,7 @@ example.com {
 		rewrite @scriptFiles {file_match.relative}
 
 		@scripts path *.ts*
-		reverse_proxy @scripts unix//run/deno-fastcgi.sock {
+		reverse_proxy @scripts unix//run/deno-fcgi.sock {
 			transport fastcgi {
 				split .ts
 				capture_stderr
@@ -93,7 +93,7 @@ example.com {
 ```caddyfile
 :8081 {
 	root * /srv/site/public
-	php_fastcgi unix//run/deno-fastcgi.sock
+	php_fastcgi unix//run/deno-fcgi.sock
 	file_server
 }
 ```
@@ -287,7 +287,7 @@ Worker 只能拿主进程权限的子集，尝试提权会报 `Can't escalate pa
 
 ```caddyfile
 @api path /api/*
-reverse_proxy @api unix//run/deno-fastcgi.sock {
+reverse_proxy @api unix//run/deno-fcgi.sock {
 	transport fastcgi {
 		split .ts
 		env FCGI_ALLOW_READ /srv/site/public
@@ -345,7 +345,7 @@ env FCGI_ALLOW_WRITE /srv/site/uploads
 ## CLI
 
 ```
--l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fastcgi.sock）
+-l, --listen <addr>     unix:/path 或 tcp:host:port（默认 unix:/tmp/deno-fcgi.sock）
     --max-workers <n>   并发 Worker 上限（默认 16）
     --prewarm <n>       每个脚本保留的空壳数（默认 1）
     --timeout <ms>      单请求超时（默认 30000）
@@ -370,7 +370,7 @@ env FCGI_ALLOW_WRITE /srv/site/uploads
 
 ```bash
 deno task test
-deno task dev --listen unix:/tmp/deno-fastcgi.sock
+deno task dev --listen unix:/tmp/deno-fcgi.sock
 
 # 另开一个终端
 caddy run --config examples/caddy/Caddyfile --adapter caddyfile

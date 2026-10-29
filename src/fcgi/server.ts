@@ -536,7 +536,7 @@ function buildEnv(
   const env: Record<string, string> = { ...params };
   delete env["FCGI_ROLE"];
   env["GATEWAY_INTERFACE"] ??= "CGI/1.1";
-  env["SERVER_SOFTWARE"] ??= "deno-fastcgi";
+  env["SERVER_SOFTWARE"] ??= "deno-fcgi";
   env["SCRIPT_FILENAME"] = route.scriptPath;
   env["SCRIPT_NAME"] = route.scriptName;
   env["DOCUMENT_ROOT"] = route.documentRoot;

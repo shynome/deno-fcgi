@@ -9,11 +9,11 @@ app.get("/", (c) =>
   c.html(
     `<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>deno-fastcgi (.php)</title>
+<head><meta charset="utf-8"><title>deno-fcgi (.php)</title>
 <style>body{font-family:system-ui,sans-serif;max-width:620px;margin:60px auto;padding:0 20px}</style>
 </head>
 <body>
-  <h1>deno-fastcgi / .php</h1>
+  <h1>deno-fcgi / .php</h1>
   <p>SCRIPT_NAME = <code>${process.env.SCRIPT_NAME}</code></p>
   <ul>
     <li><a href="/api.php">/api.php</a></li>

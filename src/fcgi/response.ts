@@ -135,7 +135,7 @@ export function errorResponse(
   detail?: string,
 ): Uint8Array {
   const body = utf8Encoder.encode(
-    `deno-fastcgi: ${message}\n${detail ? `${detail}\n` : ""}`,
+    `deno-fcgi: ${message}\n${detail ? `${detail}\n` : ""}`,
   );
   return serializeCgiResponse({
     status,
