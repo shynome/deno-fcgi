@@ -188,7 +188,7 @@ Worker 的 bootstrap 在 import 脚本前做这些事：
 | `console`             | 整体替换，`log/info/debug → stdout`，`warn/error → stderr`                        | ✅ console 不走 `Deno.stdout`，必须单独 hook |
 | `Deno.env`            | 替换 `globalThis.Deno` 为浅代理，`env.get/set/toObject` 转发到当前请求的 env 对象 | ✅                                           |
 | 全局 `Buffer`         | 从 `node:buffer` 注入，供 Node 生态库使用                                         | ✅                                           |
-| `process.stdout.push` | 作为 `write` 的别名（部分适配器会误用 `push`）                                    | ✅                                           |
+| `process.stdout.push` | 作为 `write` 的别名（兼容 0.1.x 的 hono-cgi-adapter）                               | ✅                                           |
 
 常驻 Worker 下这套注入是**每请求**都要做的，所以 Proxy、console、各个流对象都在模块级
 只创建一次，每请求只换内部指向的 `RequestState`（env 清空再填充、offset/out/err 重置、
@@ -208,10 +208,13 @@ app.get("/", (c) => c.text("Hello"));
 await handlecgi(app, process.env);
 ```
 
-它依赖 `process.stdin` 的 async iterator、`process.stdout.write/push`、全局 `Buffer`、
-`process.env`，这些均由 bootstrap 提供。
+它依赖 `process.stdin` 的 async iterator、`process.stdout.write`（0.1.x 还会把 `push`
+当 `write` 用）、全局 `Buffer`、`process.env`，这些均由 bootstrap 提供。
 
-注意该适配器只把 `PATH_INFO` 当作请求路径，且不会拼接 `QUERY_STRING`：
+0.2.0 起它会自己把 `QUERY_STRING` 拼进 URL，并把 `HTTP_*` 规范化为 `x-forwarded-for`
+这类头名，`c.req.query()` / `c.req.header()` 可直接使用；0.1.x 需要自己解析。
+
+注意该适配器只把 `PATH_INFO` 当作请求路径，不含 `SCRIPT_NAME`：
 
 | 浏览器访问              | Hono 看到的路径 |
 | ----------------------- | --------------- |

@@ -186,7 +186,7 @@ const processStdout = {
     current().out.push(toBytes(chunk));
     return true;
   },
-  // 某些 CGI 适配器（如 hono-cgi-adapter）会把 push 当 write 用
+  // hono-cgi-adapter 0.1.x 会把 push 当 write 用（0.2.0 起改用 write + drain）
   push: (chunk: unknown) => {
     current().out.push(toBytes(chunk));
     return true;

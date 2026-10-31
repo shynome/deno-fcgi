@@ -227,12 +227,13 @@ await handlecgi(app, process.env);
 
 两个需要留意的地方：
 
-- 它**不会把 `QUERY_STRING` 拼进 URL**，需要自己在脚本里解析：
-  `new URLSearchParams(process.env.QUERY_STRING ?? "")`
+- 0.2.0 起它会把 `QUERY_STRING` 拼进 URL，`c.req.query()` 可直接用；0.1.x 需要自己解析
+  `new URLSearchParams(process.env.QUERY_STRING ?? "")`，`HTTP_*` 头也要到 0.2.0 才会
+  规范化成 `x-forwarded-for` 这类形式
 - 它输出响应时会把 `Status` 头一并写出，宿主会解析后重新序列化，不会透传给客户端
 
-宿主已为其补齐 Node 兼容层：全局 `Buffer`、`process.stdout.push`、 `process.stdin` 的 async
-iterator、`process.env`。
+宿主已为其补齐 Node 兼容层：全局 `Buffer`、`process.stdin` 的 async iterator、
+`process.env`，以及 `process.stdout.push`（0.1.x 用 `push` 代替 `write`）。
 
 > 模块下载与缓存读取由 Deno 加载器负责，**不受脚本权限约束**，所以 npm/jsr 依赖
 > 在降权目录里也能正常加载。`FCGI_ALLOW_NET` 只影响脚本运行时的 `fetch`， `FCGI_ALLOW_READ` 只影响

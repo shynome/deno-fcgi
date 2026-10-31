@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 示例依赖的 `hono-cgi-adapter` 升级到 0.2.0（`deno.lock` 同步）：请求 URL 现在带
+  `QUERY_STRING`，`HTTP_*` 头名规范化为 `x-forwarded-for` 这类形式，
+  `c.req.query()` / `c.req.header()` 可直接使用；响应改为 `process.stdout.write`，
+  不再依赖 `push` 别名。`examples/` 里的查询参数手动解析已移除。
+
+  宿主仍保留 `process.stdout.push` 别名，兼容 0.1.x 的脚本。
+
 ## [0.2.0] - 2026-10-29
 
 ### Changed
