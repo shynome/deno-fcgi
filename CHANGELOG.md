@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 客户端未置 `FCGI_KEEP_CONN` 时，服务端现在会在 `END_REQUEST` 发出后真正断开连接。
+  之前 `ConnectionWriter.close()` 只置内部标志：连接既不关闭，后续请求的响应也被静默
+  丢弃，按规范等待 FIN 的客户端会一直挂住。写失败时也会立即断开，不再继续处理同一
+  连接上的请求。
+
 ### Changed
 
 - 示例依赖的 `hono-cgi-adapter` 升级到 0.2.0（`deno.lock` 同步）：请求 URL 现在带

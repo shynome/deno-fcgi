@@ -167,6 +167,9 @@ export class FcgiServer {
     pending: Map<number, PendingRequest>,
     writer: ConnectionWriter,
   ): void {
+    // 连接已进入关闭流程：不再受理新的请求帧，避免"请求成功但无输出"
+    if (writer.closed) return;
+
     const requestId = frame.requestId;
 
     switch (frame.type) {
@@ -407,9 +410,17 @@ export class FcgiServer {
 
 class ConnectionWriter {
   #chain: Promise<void> = Promise.resolve();
-  #closed = false;
+  /** 不再接受新帧（关闭流程已开始） */
+  #closing = false;
+  /** 写失败，连接已不可用 */
+  #broken = false;
 
   constructor(private readonly conn: Deno.Conn) {}
+
+  /** 是否已开始关闭，后续帧不再受理 */
+  get closed(): boolean {
+    return this.#closing || this.#broken;
+  }
 
   frames(type: number, requestId: number, data: Uint8Array): Promise<void> {
     for (const frame of encodeStreamFrames(type, requestId, data)) {
@@ -453,17 +464,35 @@ class ConnectionWriter {
   }
 
   close(): void {
-    this.#closed = true;
+    if (this.#closing) return;
+    this.#closing = true;
+    // 已排队的帧先写完再关，避免把响应截断；
+    // 客户端没置 FCGI_KEEP_CONN 时必须由服务端断开，否则对端会一直等 FIN
+    this.#chain = this.#chain.then(() => this.#shutdown());
+  }
+
+  /** 写失败：立即断开，让读循环尽快退出 */
+  #abort(): void {
+    this.#broken = true;
+    this.#shutdown();
+  }
+
+  #shutdown(): void {
+    try {
+      this.conn.close();
+    } catch {
+      // 已关闭
+    }
   }
 
   #enqueue(bytes: Uint8Array): void {
-    if (this.#closed) return;
+    if (this.closed) return;
     this.#chain = this.#chain.then(async () => {
-      if (this.#closed) return;
+      if (this.#broken) return;
       try {
         await writeAll(this.conn, bytes);
       } catch {
-        this.#closed = true;
+        this.#abort();
       }
     });
   }
