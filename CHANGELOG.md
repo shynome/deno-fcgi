@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-31
+
 ### Fixed
 
 - 客户端未置 `FCGI_KEEP_CONN` 时，服务端现在会在 `END_REQUEST` 发出后真正断开连接。
